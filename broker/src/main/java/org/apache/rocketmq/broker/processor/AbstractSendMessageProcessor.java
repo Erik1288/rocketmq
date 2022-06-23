@@ -60,13 +60,13 @@ import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
 import org.apache.rocketmq.remoting.common.RemotingHelper;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
-import org.apache.rocketmq.remoting.netty.NettyRequestProcessor;
+import org.apache.rocketmq.remoting.netty.AsyncNettyRequestProcessor;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 import org.apache.rocketmq.common.message.MessageExtBrokerInner;
 import org.apache.rocketmq.store.PutMessageResult;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
 
-public abstract class AbstractSendMessageProcessor implements NettyRequestProcessor {
+public abstract class AbstractSendMessageProcessor extends AsyncNettyRequestProcessor {
     protected static final InternalLogger LOGGER = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
     protected static final InternalLogger DLQ_LOG = InternalLoggerFactory.getLogger(LoggerName.DLQ_LOGGER_NAME);
 
@@ -88,7 +88,7 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
         this.consumeMessageHookList = consumeMessageHookList;
     }
 
-    protected RemotingCommand consumerSendMsgBack(final ChannelHandlerContext ctx, final RemotingCommand request)
+    protected RemotingCommand consumerSendMsgBack(final RemotingCommand request)
         throws RemotingCommandException {
         final RemotingCommand response = RemotingCommand.createResponseCommand(null);
         final ConsumerSendMsgBackRequestHeader requestHeader =
@@ -350,8 +350,8 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
         }
     }
 
-    protected SendMessageContext buildMsgContext(ChannelHandlerContext ctx,
-        SendMessageRequestHeader requestHeader) {
+    protected SendMessageContext buildMsgContext(SocketAddress clientHost,
+                                                 SendMessageRequestHeader requestHeader) {
         String namespace = NamespaceUtil.getNamespaceFromResource(requestHeader.getTopic());
 
         SendMessageContext traceContext;
@@ -360,7 +360,7 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
         traceContext.setProducerGroup(requestHeader.getProducerGroup());
         traceContext.setTopic(requestHeader.getTopic());
         traceContext.setMsgProps(requestHeader.getProperties());
-        traceContext.setBornHost(RemotingHelper.parseChannelRemoteAddr(ctx.channel()));
+        traceContext.setBornHost(RemotingHelper.simpleRemoteHost(clientHost));
         traceContext.setBrokerAddr(this.brokerController.getBrokerAddr());
         traceContext.setBrokerRegionId(this.brokerController.getBrokerConfig().getRegionId());
         traceContext.setBornTimeStamp(requestHeader.getBornTimestamp());
@@ -453,9 +453,9 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
         return response;
     }
 
-    protected RemotingCommand msgCheck(final ChannelHandlerContext ctx,
-        final SendMessageRequestHeader requestHeader, final RemotingCommand request,
-        final RemotingCommand response) {
+    protected RemotingCommand msgCheck(SocketAddress clientHost,
+                                       final SendMessageRequestHeader requestHeader, final RemotingCommand request,
+                                       final RemotingCommand response) {
         if (!PermName.isWriteable(this.brokerController.getBrokerConfig().getBrokerPermission())
             && this.brokerController.getTopicConfigManager().isOrderTopic(requestHeader.getTopic())) {
             response.setCode(ResponseCode.NO_PERMISSION);
@@ -483,11 +483,11 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
                 }
             }
 
-            LOGGER.warn("the topic {} not exist, producer: {}", requestHeader.getTopic(), ctx.channel().remoteAddress());
+            LOGGER.warn("the topic {} not exist, producer: {}", requestHeader.getTopic(), clientHost);
             topicConfig = this.brokerController.getTopicConfigManager().createTopicInSendMessageMethod(
                 requestHeader.getTopic(),
                 requestHeader.getDefaultTopic(),
-                RemotingHelper.parseChannelRemoteAddr(ctx.channel()),
+                RemotingHelper.simpleRemoteHost(clientHost),
                 requestHeader.getDefaultTopicQueueNums(), topicSysFlag);
 
             if (null == topicConfig) {
@@ -513,7 +513,7 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
             String errorInfo = String.format("request queueId[%d] is illegal, %s Producer: %s",
                 queueIdInt,
                 topicConfig.toString(),
-                RemotingHelper.parseChannelRemoteAddr(ctx.channel()));
+                RemotingHelper.simpleRemoteHost(clientHost));
 
             LOGGER.warn(errorInfo);
             response.setCode(ResponseCode.SYSTEM_ERROR);
@@ -542,8 +542,8 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
         }
     }
 
-    public void executeSendMessageHookBefore(final ChannelHandlerContext ctx, final RemotingCommand request,
-        SendMessageContext context) {
+    public void executeSendMessageHookBefore(SocketAddress clientHost, final RemotingCommand request,
+                                             SendMessageContext context) {
         if (hasSendMessageHook()) {
             for (SendMessageHook hook : this.sendMessageHookList) {
                 try {
@@ -556,7 +556,7 @@ public abstract class AbstractSendMessageProcessor implements NettyRequestProces
                         context.setTopic(requestHeader.getTopic());
                         context.setBodyLength(request.getBody().length);
                         context.setMsgProps(requestHeader.getProperties());
-                        context.setBornHost(RemotingHelper.parseChannelRemoteAddr(ctx.channel()));
+                        context.setBornHost(RemotingHelper.simpleRemoteHost(clientHost));
                         context.setBrokerAddr(this.brokerController.getBrokerAddr());
                         context.setQueueId(requestHeader.getQueueId());
                     }

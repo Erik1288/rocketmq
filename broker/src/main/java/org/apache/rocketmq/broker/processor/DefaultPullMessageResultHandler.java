@@ -17,10 +17,6 @@
 
 package org.apache.rocketmq.broker.processor;
 
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelFutureListener;
-import io.netty.channel.FileRegion;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.longpolling.PullRequest;
 import org.apache.rocketmq.broker.pagecache.ManyMessageTransfer;
@@ -48,8 +44,10 @@ import org.apache.rocketmq.store.MessageFilter;
 import org.apache.rocketmq.store.PutMessageResult;
 import org.apache.rocketmq.store.config.BrokerRole;
 
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 public class DefaultPullMessageResultHandler implements PullMessageResultHandler {
 
@@ -61,17 +59,19 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
     }
 
     @Override
-    public RemotingCommand handle(final GetMessageResult getMessageResult,
-                                  final RemotingCommand request,
-                                  final PullMessageRequestHeader requestHeader,
-                                  final Channel channel,
-                                  final SubscriptionData subscriptionData,
-                                  final SubscriptionGroupConfig subscriptionGroupConfig,
-                                  final boolean brokerAllowSuspend,
-                                  final MessageFilter messageFilter,
-                                  RemotingCommand response) {
+    public PullMessageResult handle(final GetMessageResult getMessageResult,
+                                    final RemotingCommand request,
+                                    final PullMessageRequestHeader requestHeader,
+                                    final SocketAddress clientHost,
+                                    final SubscriptionData subscriptionData,
+                                    final SubscriptionGroupConfig subscriptionGroupConfig,
+                                    final boolean brokerAllowSuspend,
+                                    final MessageFilter messageFilter,
+                                    RemotingCommand response) {
 
         final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
+
+        PullMessageResult pullMessageResult = new PullMessageResult();
 
         switch (response.getCode()) {
             case ResponseCode.SUCCESS:
@@ -83,12 +83,6 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
 
                 this.brokerController.getBrokerStatsManager().incBrokerGetNums(getMessageResult.getMessageCount());
 
-                if (!channelIsWritable(channel, requestHeader)) {
-                    getMessageResult.release();
-                    //ignore pull request
-                    return null;
-                }
-
                 if (this.brokerController.getBrokerConfig().isTransferMsgByHeap()) {
 
                     final long beginTimeMills = this.brokerController.getMessageStore().now();
@@ -97,25 +91,16 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
                             requestHeader.getTopic(), requestHeader.getQueueId(),
                             (int) (this.brokerController.getMessageStore().now() - beginTimeMills));
                     response.setBody(r);
-                    return response;
+                    pullMessageResult.setSyncResponse(response);
+                    return pullMessageResult;
                 } else {
-                    try {
-                        FileRegion fileRegion =
-                                new ManyMessageTransfer(response.encodeHeader(getMessageResult.getBufferTotalSize()), getMessageResult);
-                        channel.writeAndFlush(fileRegion).addListener(new ChannelFutureListener() {
-                            @Override
-                            public void operationComplete(ChannelFuture future) throws Exception {
-                                getMessageResult.release();
-                                if (!future.isSuccess()) {
-                                    log.error("Fail to transfer messages from page cache to {}", channel.remoteAddress(), future.cause());
-                                }
-                            }
-                        });
-                    } catch (Throwable e) {
-                        log.error("Error occurred when transferring messages from page cache", e);
-                        getMessageResult.release();
-                    }
-                    return null;
+                    ManyMessageTransfer manyMessageTransfer =
+                            new ManyMessageTransfer(response.encodeHeader(getMessageResult.getBufferTotalSize()), getMessageResult);
+                    Runnable callback = getMessageResult::release;
+                    response.setAttachment(manyMessageTransfer);
+                    response.setCallback(callback);
+                    pullMessageResult.setSyncResponse(response);
+                    return pullMessageResult;
                 }
             case ResponseCode.PULL_NOT_FOUND:
                 final boolean hasSuspendFlag = PullSysFlag.hasSuspendFlag(requestHeader.getSysFlag());
@@ -130,10 +115,13 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
                     String topic = requestHeader.getTopic();
                     long offset = requestHeader.getQueueOffset();
                     int queueId = requestHeader.getQueueId();
-                    PullRequest pullRequest = new PullRequest(request, channel, pollingTimeMills,
-                            this.brokerController.getMessageStore().now(), offset, subscriptionData, messageFilter);
+                    CompletableFuture<RemotingCommand> pullFuture = new CompletableFuture<>();
+                    PullRequest pullRequest = new PullRequest(request, clientHost, pollingTimeMills,
+                            this.brokerController.getMessageStore().now(), offset, subscriptionData, messageFilter, pullFuture);
                     this.brokerController.getPullRequestHoldService().suspendPullRequest(topic, queueId, pullRequest);
-                    return null;
+
+                    pullMessageResult.setAsyncResponse(pullFuture);
+                    return pullMessageResult;
                 }
             case ResponseCode.PULL_RETRY_IMMEDIATELY:
                 break;
@@ -167,19 +155,8 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
                 log.warn("[BUG] impossible result code of get message: {}", response.getCode());
                 assert false;
         }
-
-        return response;
-    }
-
-    private boolean channelIsWritable(Channel channel, PullMessageRequestHeader requestHeader) {
-        if (this.brokerController.getBrokerConfig().isNetWorkFlowController()) {
-            if (!channel.isWritable()) {
-                log.warn("channel {} not writable ,cid {}", channel.remoteAddress(), requestHeader.getConsumerGroup());
-                return false;
-            }
-
-        }
-        return true;
+        pullMessageResult.setSyncResponse(response);
+        return pullMessageResult;
     }
 
     protected byte[] readGetMessageResult(final GetMessageResult getMessageResult, final String group, final String topic,

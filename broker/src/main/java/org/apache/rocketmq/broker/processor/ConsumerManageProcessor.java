@@ -17,6 +17,8 @@
 package org.apache.rocketmq.broker.processor;
 
 import io.netty.channel.ChannelHandlerContext;
+
+import java.net.SocketAddress;
 import java.util.Set;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.client.ConsumerGroupInfo;
@@ -63,9 +65,9 @@ public class ConsumerManageProcessor implements NettyRequestProcessor {
             case RequestCode.GET_CONSUMER_LIST_BY_GROUP:
                 return this.getConsumerListByGroup(ctx, request);
             case RequestCode.UPDATE_CONSUMER_OFFSET:
-                return this.updateConsumerOffset(ctx, request);
+                return this.updateConsumerOffset(ctx.channel().remoteAddress(), request);
             case RequestCode.QUERY_CONSUMER_OFFSET:
-                return this.queryConsumerOffset(ctx, request);
+                return this.queryConsumerOffset(request);
             default:
                 break;
         }
@@ -142,7 +144,7 @@ public class ConsumerManageProcessor implements NettyRequestProcessor {
     }
 
 
-    private RemotingCommand updateConsumerOffset(ChannelHandlerContext ctx, RemotingCommand request)
+    private RemotingCommand updateConsumerOffset(SocketAddress clientHost, RemotingCommand request)
         throws RemotingCommandException {
         final RemotingCommand response =
             RemotingCommand.createResponseCommand(UpdateConsumerOffsetResponseHeader.class);
@@ -157,7 +159,7 @@ public class ConsumerManageProcessor implements NettyRequestProcessor {
         }
         Set<String> topicSets = this.brokerController.getTopicConfigManager().getTopicConfigTable().keySet();
         if (topicSets.contains(requestHeader.getTopic())) {
-            this.brokerController.getConsumerOffsetManager().commitOffset(RemotingHelper.parseChannelRemoteAddr(ctx.channel()), requestHeader.getConsumerGroup(),
+            this.brokerController.getConsumerOffsetManager().commitOffset(RemotingHelper.simpleRemoteHost(clientHost), requestHeader.getConsumerGroup(),
                 requestHeader.getTopic(), requestHeader.getQueueId(), requestHeader.getCommitOffset());
             response.setCode(ResponseCode.SUCCESS);
             response.setRemark(null);
@@ -264,7 +266,7 @@ public class ConsumerManageProcessor implements NettyRequestProcessor {
         }
     }
 
-    private RemotingCommand queryConsumerOffset(ChannelHandlerContext ctx, RemotingCommand request)
+    private RemotingCommand queryConsumerOffset(RemotingCommand request)
         throws RemotingCommandException {
         final RemotingCommand response =
             RemotingCommand.createResponseCommand(QueryConsumerOffsetResponseHeader.class);

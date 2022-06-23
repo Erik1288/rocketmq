@@ -86,6 +86,10 @@ public class RemotingCommand {
 
     private transient byte[] body;
 
+    // for async response
+    private Object attachment;
+    private Runnable callback;
+
     protected RemotingCommand() {
     }
 
@@ -553,6 +557,22 @@ public class RemotingCommand {
             extFields = new HashMap<String, String>();
         }
         extFields.put(key, value);
+    }
+
+    public Object getAttachment() {
+        return attachment;
+    }
+
+    public void setAttachment(Object attachment) {
+        this.attachment = attachment;
+    }
+
+    public Runnable getCallback() {
+        return callback;
+    }
+
+    public void setCallback(Runnable callback) {
+        this.callback = callback;
     }
 
     @Override

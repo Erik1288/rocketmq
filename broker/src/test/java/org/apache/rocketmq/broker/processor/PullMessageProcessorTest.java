@@ -27,9 +27,12 @@ import org.apache.rocketmq.broker.subscription.SubscriptionGroupManager;
 import org.apache.rocketmq.common.BrokerConfig;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
+import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.protocol.RequestCode;
 import org.apache.rocketmq.common.protocol.ResponseCode;
 import org.apache.rocketmq.common.protocol.header.PullMessageRequestHeader;
+import org.apache.rocketmq.common.protocol.header.SendMessageRequestHeader;
+import org.apache.rocketmq.common.protocol.header.SendMessageRequestHeaderV2;
 import org.apache.rocketmq.common.protocol.heartbeat.ConsumeType;
 import org.apache.rocketmq.common.protocol.heartbeat.ConsumerData;
 import org.apache.rocketmq.common.protocol.heartbeat.MessageModel;
@@ -54,6 +57,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -66,6 +70,7 @@ import static org.mockito.Mockito.when;
 @RunWith(MockitoJUnitRunner.class)
 public class PullMessageProcessorTest {
     private PullMessageProcessor pullMessageProcessor;
+    private SendMessageProcessor sendMessageProcessor;
     @Spy
     private BrokerController brokerController = new BrokerController(new BrokerConfig(), new NettyServerConfig(),
         new NettyClientConfig(), new MessageStoreConfig());
@@ -82,6 +87,7 @@ public class PullMessageProcessorTest {
         brokerController.setMessageStore(messageStore);
         SubscriptionGroupManager subscriptionGroupManager = new SubscriptionGroupManager(brokerController);
         pullMessageProcessor = new PullMessageProcessor(brokerController);
+        sendMessageProcessor = new SendMessageProcessor(brokerController);
         Channel mockChannel = mock(Channel.class);
         when(mockChannel.isWritable()).thenReturn(true);
         when(mockChannel.remoteAddress()).thenReturn(new InetSocketAddress(1024));
@@ -208,6 +214,18 @@ public class PullMessageProcessorTest {
         assertThat(response.getCode()).isEqualTo(ResponseCode.NO_PERMISSION);
     }
 
+    @Test
+    public void test_Liteddd() throws Exception {
+        RemotingCommand pullMessageRequest = createPullMsgCommand(RequestCode.LITE_PULL_MESSAGE);
+        // RemotingCommand response = pullMessageProcessor.processRequest(handlerContext, remotingCommand);
+        CompletableFuture<RemotingCommand> future = pullMessageProcessor.asyncProcessRequest(handlerContext, pullMessageRequest);
+        RemotingCommand response = future.get();
+        RemotingCommand sendMessageRequest = createSendMsgCommand(RequestCode.SEND_MESSAGE);
+        sendMessageProcessor.processRequest(handlerContext, sendMessageRequest);
+        assertThat(response).isNotNull();
+        // assertThat(response.getCode()).isEqualTo(ResponseCode.NO_PERMISSION);
+    }
+
     private RemotingCommand createPullMsgCommand(int requestCode) {
         PullMessageRequestHeader requestHeader = new PullMessageRequestHeader();
         requestHeader.setCommitOffset(123L);
@@ -219,6 +237,30 @@ public class PullMessageProcessorTest {
         requestHeader.setTopic(topic);
         requestHeader.setSysFlag(0);
         requestHeader.setSubVersion(100L);
+        RemotingCommand request = RemotingCommand.createRequestCommand(requestCode, requestHeader);
+        request.makeCustomHeaderToNet();
+        return request;
+    }
+
+    private RemotingCommand createSendMsgCommand(int requestCode) {
+        // requestHeader.setCommitOffset(123L);
+        // requestHeader.setConsumerGroup(group);
+        // requestHeader.setMaxMsgNums(100);
+        // requestHeader.setQueueId(1);
+        // requestHeader.setQueueOffset(456L);
+        // requestHeader.setSubscription("*");
+        // requestHeader.setTopic(topic);
+        // requestHeader.setSysFlag(0);
+        // requestHeader.setSubVersion(100L);
+        SendMessageRequestHeader requestHeader = new SendMessageRequestHeader();
+        requestHeader.setTopic(topic);
+        requestHeader.setDefaultTopicQueueNums(12);
+        requestHeader.setQueueId(1);
+        requestHeader.setSysFlag(0);
+        requestHeader.setBornTimestamp(System.currentTimeMillis());
+        requestHeader.setFlag(0);
+        requestHeader.setReconsumeTimes(0);
+        requestHeader.setUnitMode(false);
         RemotingCommand request = RemotingCommand.createRequestCommand(requestCode, requestHeader);
         request.makeCustomHeaderToNet();
         return request;

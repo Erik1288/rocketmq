@@ -20,6 +20,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.FileRegion;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslHandler;
 import java.net.SocketAddress;
@@ -29,6 +30,7 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map.Entry;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutorService;
@@ -36,6 +38,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
@@ -217,7 +220,41 @@ public abstract class NettyRemotingAbstract {
                         }
 
                         if (exception == null) {
-                            response = pair.getObject1().processRequest(ctx, cmd);
+                            NettyRequestProcessor processor = pair.getObject1();
+                            if (processor instanceof AsyncNettyRequestProcessor) {
+
+                                Consumer<RemotingCommand> doResponse = resp -> {
+                                    if (!cmd.isOnewayRPC()) {
+                                        if (resp != null) {
+                                            resp.setOpaque(opaque);
+                                            resp.markResponseType();
+                                            try {
+                                                Object payload;
+                                                if (resp.getAttachment() instanceof FileRegion) {
+                                                    payload = resp.getAttachment();
+                                                } else {
+                                                    payload = resp;
+                                                }
+                                                ctx.writeAndFlush(payload).addListener((ChannelFutureListener) f -> {
+                                                    if (resp.getCallback() != null) {
+                                                        resp.getCallback().run();
+                                                    }
+                                                });
+                                            } catch (Throwable e) {
+                                                log.error("process request over, but response failed", e);
+                                                log.error(cmd.toString());
+                                                log.error(resp.toString());
+                                            }
+                                        }
+                                    }
+                                };
+
+                                CompletableFuture<RemotingCommand> future = ((AsyncNettyRequestProcessor) processor).asyncProcessRequest(ctx, cmd);
+                                future.thenAccept(doResponse);
+                                return ;
+                            } else {
+                                response = pair.getObject1().processRequest(ctx, cmd);
+                            }
                         } else {
                             response = RemotingCommand.createResponseCommand(null);
                             response.setCode(RemotingSysResponseCode.SYSTEM_ERROR);

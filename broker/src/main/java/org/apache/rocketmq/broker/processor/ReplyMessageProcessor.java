@@ -45,6 +45,8 @@ import org.apache.rocketmq.common.message.MessageExtBrokerInner;
 import org.apache.rocketmq.store.PutMessageResult;
 import org.apache.rocketmq.store.stats.BrokerStatsManager;
 
+import java.net.SocketAddress;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ThreadLocalRandom;
 
 public class ReplyMessageProcessor extends AbstractSendMessageProcessor implements NettyRequestProcessor {
@@ -52,6 +54,11 @@ public class ReplyMessageProcessor extends AbstractSendMessageProcessor implemen
 
     public ReplyMessageProcessor(final BrokerController brokerController) {
         super(brokerController);
+    }
+
+    @Override
+    public CompletableFuture<RemotingCommand> asyncProcessRequest(ChannelHandlerContext ctx, RemotingCommand request) throws RemotingCommandException {
+        return null;
     }
 
     @Override
@@ -63,10 +70,10 @@ public class ReplyMessageProcessor extends AbstractSendMessageProcessor implemen
             return null;
         }
 
-        mqtraceContext = buildMsgContext(ctx, requestHeader);
-        this.executeSendMessageHookBefore(ctx, request, mqtraceContext);
+        mqtraceContext = buildMsgContext(ctx.channel().remoteAddress(), requestHeader);
+        this.executeSendMessageHookBefore(ctx.channel().remoteAddress(), request, mqtraceContext);
 
-        RemotingCommand response = this.processReplyMessageRequest(ctx, request, mqtraceContext, requestHeader);
+        RemotingCommand response = this.processReplyMessageRequest(ctx.channel().remoteAddress(), request, mqtraceContext, requestHeader);
 
         this.executeSendMessageHookAfter(response, mqtraceContext);
         return response;
@@ -95,7 +102,7 @@ public class ReplyMessageProcessor extends AbstractSendMessageProcessor implemen
         return requestHeader;
     }
 
-    private RemotingCommand processReplyMessageRequest(final ChannelHandlerContext ctx,
+    private RemotingCommand processReplyMessageRequest(final SocketAddress clientHost,
         final RemotingCommand request,
         final SendMessageContext sendMessageContext,
         final SendMessageRequestHeader requestHeader) {
@@ -116,7 +123,7 @@ public class ReplyMessageProcessor extends AbstractSendMessageProcessor implemen
         }
 
         response.setCode(-1);
-        super.msgCheck(ctx, requestHeader, request, response);
+        super.msgCheck(clientHost, requestHeader, request, response);
         if (response.getCode() != -1) {
             return response;
         }
@@ -138,11 +145,11 @@ public class ReplyMessageProcessor extends AbstractSendMessageProcessor implemen
         MessageAccessor.setProperties(msgInner, MessageDecoder.string2messageProperties(requestHeader.getProperties()));
         msgInner.setPropertiesString(requestHeader.getProperties());
         msgInner.setBornTimestamp(requestHeader.getBornTimestamp());
-        msgInner.setBornHost(ctx.channel().remoteAddress());
+        msgInner.setBornHost(clientHost);
         msgInner.setStoreHost(this.getStoreHost());
         msgInner.setReconsumeTimes(requestHeader.getReconsumeTimes() == null ? 0 : requestHeader.getReconsumeTimes());
 
-        PushReplyResult pushReplyResult = this.pushReplyMessage(ctx, requestHeader, msgInner);
+        PushReplyResult pushReplyResult = this.pushReplyMessage(clientHost, requestHeader, msgInner);
         this.handlePushReplyResult(pushReplyResult, response, responseHeader, queueIdInt);
 
         if (this.brokerController.getBrokerConfig().isStoreReplyMessageEnable()) {
@@ -153,11 +160,11 @@ public class ReplyMessageProcessor extends AbstractSendMessageProcessor implemen
         return response;
     }
 
-    private PushReplyResult pushReplyMessage(final ChannelHandlerContext ctx,
+    private PushReplyResult pushReplyMessage(final SocketAddress clientHost,
         final SendMessageRequestHeader requestHeader,
         final Message msg) {
         ReplyMessageRequestHeader replyMessageRequestHeader = new ReplyMessageRequestHeader();
-        replyMessageRequestHeader.setBornHost(ctx.channel().remoteAddress().toString());
+        replyMessageRequestHeader.setBornHost(clientHost.toString());
         replyMessageRequestHeader.setStoreHost(this.getStoreHost().toString());
         replyMessageRequestHeader.setStoreTimestamp(System.currentTimeMillis());
         replyMessageRequestHeader.setProducerGroup(requestHeader.getProducerGroup());

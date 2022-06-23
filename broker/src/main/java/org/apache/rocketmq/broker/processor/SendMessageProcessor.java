@@ -16,6 +16,7 @@
  */
 package org.apache.rocketmq.broker.processor;
 
+import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.util.Map;
 import java.util.Optional;
@@ -72,41 +73,59 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
     @Override
     public RemotingCommand processRequest(ChannelHandlerContext ctx,
         RemotingCommand request) throws RemotingCommandException {
+        return null;
+    }
+
+    @Override
+    public CompletableFuture<RemotingCommand> asyncProcessRequest(ChannelHandlerContext ctx,
+        RemotingCommand request) throws RemotingCommandException {
         SendMessageContext traceContext;
         switch (request.getCode()) {
             case RequestCode.CONSUMER_SEND_MSG_BACK:
-                return this.consumerSendMsgBack(ctx, request);
+                return CompletableFuture.completedFuture(this.consumerSendMsgBack(request));
             default:
                 SendMessageRequestHeader requestHeader = parseRequestHeader(request);
                 if (requestHeader == null) {
-                    return null;
+                    return CompletableFuture.completedFuture(null);
                 }
                 TopicQueueMappingContext mappingContext = this.brokerController.getTopicQueueMappingManager().buildTopicQueueMappingContext(requestHeader, true);
                 RemotingCommand rewriteResult = this.brokerController.getTopicQueueMappingManager().rewriteRequestForStaticTopic(requestHeader, mappingContext);
                 if (rewriteResult != null) {
-                    return rewriteResult;
+                    return CompletableFuture.completedFuture(rewriteResult);
                 }
-                traceContext = buildMsgContext(ctx, requestHeader);
+                traceContext = buildMsgContext(ctx.channel().remoteAddress(), requestHeader);
                 String owner = request.getExtFields().get(BrokerStatsManager.COMMERCIAL_OWNER);
                 traceContext.setCommercialOwner(owner);
                 try {
-                    this.executeSendMessageHookBefore(ctx, request, traceContext);
+                    this.executeSendMessageHookBefore(ctx.channel().remoteAddress(), request, traceContext);
                 } catch (AbortProcessException e) {
                     final RemotingCommand errorResponse = RemotingCommand.createResponseCommand(e.getResponseCode(), e.getErrorMessage());
                     errorResponse.setOpaque(request.getOpaque());
-                    return errorResponse;
+                    return CompletableFuture.completedFuture(errorResponse);
                 }
 
-                RemotingCommand response;
+                SendMessageCallback sendMessageCallback = (context, resp) -> executeSendMessageHookAfter(resp, context);
+
+                CompletableFuture<RemotingCommand> future;
                 if (requestHeader.isBatch()) {
-                    response = this.sendBatchMessage(ctx, request, traceContext, requestHeader, mappingContext,
-                        (ctx1, response1) -> executeSendMessageHookAfter(response1, ctx1));
+                    future = this.sendBatchMessage(
+                            ctx.channel().remoteAddress(),
+                            request,
+                            traceContext,
+                            requestHeader,
+                            mappingContext,
+                            sendMessageCallback);
                 } else {
-                    response = this.sendMessage(ctx, request, traceContext, requestHeader, mappingContext,
-                        (ctx12, response12) -> executeSendMessageHookAfter(response12, ctx12));
+                    future = this.asyncSendMessage(
+                            ctx.channel().remoteAddress(),
+                            request,
+                            traceContext,
+                            requestHeader,
+                            mappingContext,
+                            sendMessageCallback);
                 }
 
-                return response;
+                return future;
         }
     }
 
@@ -203,16 +222,16 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         return true;
     }
 
-    public RemotingCommand sendMessage(final ChannelHandlerContext ctx,
-        final RemotingCommand request,
-        final SendMessageContext sendMessageContext,
-        final SendMessageRequestHeader requestHeader,
-        final TopicQueueMappingContext mappingContext,
-        final SendMessageCallback sendMessageCallback) throws RemotingCommandException {
+    public CompletableFuture<RemotingCommand> asyncSendMessage(final SocketAddress clientHost,
+                                                               final RemotingCommand request,
+                                                               final SendMessageContext sendMessageContext,
+                                                               final SendMessageRequestHeader requestHeader,
+                                                               final TopicQueueMappingContext mappingContext,
+                                                               final SendMessageCallback sendMessageCallback) throws RemotingCommandException {
 
-        final RemotingCommand response = preSend(ctx, request, requestHeader);
+        final RemotingCommand response = preSend(clientHost, request, requestHeader);
         if (response.getCode() != -1) {
-            return response;
+            return CompletableFuture.completedFuture(response);
         }
 
         final SendMessageResponseHeader responseHeader = (SendMessageResponseHeader) response.readCustomHeader();
@@ -232,7 +251,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
 
         Map<String, String> oriProps = MessageDecoder.string2messageProperties(requestHeader.getProperties());
         if (!handleRetryAndDLQ(requestHeader, response, request, msgInner, topicConfig, oriProps)) {
-            return response;
+            return CompletableFuture.completedFuture(response);
         }
 
         msgInner.setBody(body);
@@ -247,7 +266,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         MessageAccessor.setProperties(msgInner, oriProps);
         msgInner.setTagsCode(MessageExtBrokerInner.tagsString2tagsCode(topicConfig.getTopicFilterType(), msgInner.getTags()));
         msgInner.setBornTimestamp(requestHeader.getBornTimestamp());
-        msgInner.setBornHost(ctx.channel().remoteAddress());
+        msgInner.setBornHost(clientHost);
         msgInner.setStoreHost(this.getStoreHost());
         msgInner.setReconsumeTimes(requestHeader.getReconsumeTimes() == null ? 0 : requestHeader.getReconsumeTimes());
         String clusterName = this.brokerController.getBrokerConfig().getBrokerClusterName();
@@ -265,51 +284,52 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
                 response.setRemark(
                     "the broker[" + this.brokerController.getBrokerConfig().getBrokerIP1()
                         + "] sending transaction message is forbidden");
-                return response;
+                return CompletableFuture.completedFuture(response);
             }
             sendTransactionPrepareMessage = true;
         }
 
         long beginTimeMillis = this.brokerController.getMessageStore().now();
 
-        if (brokerController.getBrokerConfig().isAsyncSendEnable()) {
-            CompletableFuture<PutMessageResult> asyncPutMessageFuture;
-            if (sendTransactionPrepareMessage) {
-                asyncPutMessageFuture = this.brokerController.getTransactionalMessageService().asyncPrepareMessage(msgInner);
-            } else {
-                asyncPutMessageFuture = this.brokerController.getMessageStore().asyncPutMessage(msgInner);
-            }
-
-            final int finalQueueIdInt = queueIdInt;
-            final MessageExtBrokerInner finalMsgInner = msgInner;
-            asyncPutMessageFuture.thenAcceptAsync(putMessageResult -> {
-                RemotingCommand responseFuture =
-                    handlePutMessageResult(putMessageResult, response, request, finalMsgInner, responseHeader, sendMessageContext,
-                        ctx, finalQueueIdInt, beginTimeMillis, mappingContext);
-                if (responseFuture != null) {
-                    doResponse(ctx, request, responseFuture);
-                }
-                sendMessageCallback.onComplete(sendMessageContext, response);
-            }, this.brokerController.getPutMessageFutureExecutor());
-            // Returns null to release the send message thread
-            return null;
+        CompletableFuture<PutMessageResult> asyncPutMessageFuture;
+        if (sendTransactionPrepareMessage) {
+            asyncPutMessageFuture = this.brokerController.getTransactionalMessageService().asyncPrepareMessage(msgInner);
         } else {
-            PutMessageResult putMessageResult = null;
-            if (sendTransactionPrepareMessage) {
-                putMessageResult = this.brokerController.getTransactionalMessageService().prepareMessage(msgInner);
-            } else {
-                putMessageResult = this.brokerController.getMessageStore().putMessage(msgInner);
-            }
-            handlePutMessageResult(putMessageResult, response, request, msgInner, responseHeader, sendMessageContext, ctx, queueIdInt, beginTimeMillis, mappingContext);
-            sendMessageCallback.onComplete(sendMessageContext, response);
-            return response;
+            asyncPutMessageFuture = this.brokerController.getMessageStore().asyncPutMessage(msgInner);
         }
+
+        final int finalQueueIdInt = queueIdInt;
+        final MessageExtBrokerInner finalMsgInner = msgInner;
+
+        CompletableFuture<RemotingCommand> responseReadyFuture = new CompletableFuture<>();
+
+        asyncPutMessageFuture.thenAcceptAsync(putMessageResult -> {
+            RemotingCommand resp = handlePutMessageResult(
+                    putMessageResult,
+                    response,
+                    request,
+                    finalMsgInner,
+                    responseHeader,
+                    sendMessageContext,
+                    finalQueueIdInt,
+                    beginTimeMillis,
+                    mappingContext);
+
+            // This callback must be called after writeAndFlush(response).
+            Runnable callback = () -> sendMessageCallback.onComplete(sendMessageContext, response);
+            if (resp != null) {
+                resp.setCallback(callback);
+            }
+            responseReadyFuture.complete(resp);
+        }, this.brokerController.getPutMessageFutureExecutor());
+
+        return responseReadyFuture;
     }
 
     private RemotingCommand handlePutMessageResult(PutMessageResult putMessageResult, RemotingCommand response,
-        RemotingCommand request, MessageExt msg,
-        SendMessageResponseHeader responseHeader, SendMessageContext sendMessageContext, ChannelHandlerContext ctx,
-        int queueIdInt, long beginTimeMillis, TopicQueueMappingContext mappingContext) {
+                                                   RemotingCommand request, MessageExt msg,
+                                                   SendMessageResponseHeader responseHeader, SendMessageContext sendMessageContext,
+                                                   int queueIdInt, long beginTimeMillis, TopicQueueMappingContext mappingContext) {
         if (putMessageResult == null) {
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark("store putMessage return null");
@@ -406,8 +426,6 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
                 return rewriteResult;
             }
 
-            doResponse(ctx, request, response);
-
             if (hasSendMessageHook()) {
                 sendMessageContext.setMsgId(responseHeader.getMsgId());
                 sendMessageContext.setQueueId(responseHeader.getQueueId());
@@ -432,7 +450,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
                 sendMessageContext.setSendMsgSize(wroteSize);
                 sendMessageContext.setSendMsgNum(msgNum);
             }
-            return null;
+            return response;
         } else {
             if (hasSendMessageHook()) {
                 AppendMessageResult appendMessageResult = putMessageResult.getAppendMessageResult();
@@ -460,17 +478,17 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         return response;
     }
 
-    private RemotingCommand sendBatchMessage(final ChannelHandlerContext ctx,
-        final RemotingCommand request,
-        final SendMessageContext sendMessageContext,
-        final SendMessageRequestHeader requestHeader,
-        TopicQueueMappingContext mappingContext,
-        final SendMessageCallback sendMessageCallback) {
-        final RemotingCommand response = preSend(ctx, request, requestHeader);
+    private CompletableFuture<RemotingCommand> sendBatchMessage(final SocketAddress clientHost,
+                                                                final RemotingCommand request,
+                                                                final SendMessageContext sendMessageContext,
+                                                                final SendMessageRequestHeader requestHeader,
+                                                                TopicQueueMappingContext mappingContext,
+                                                                final SendMessageCallback sendMessageCallback) {
+        final RemotingCommand response = preSend(clientHost, request, requestHeader);
         final SendMessageResponseHeader responseHeader = (SendMessageResponseHeader) response.readCustomHeader();
 
         if (response.getCode() != -1) {
-            return response;
+            return CompletableFuture.completedFuture(response);
         }
 
         int queueIdInt = requestHeader.getQueueId();
@@ -483,13 +501,13 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         if (requestHeader.getTopic().length() > Byte.MAX_VALUE) {
             response.setCode(ResponseCode.MESSAGE_ILLEGAL);
             response.setRemark("message topic length too long " + requestHeader.getTopic().length());
-            return response;
+            return CompletableFuture.completedFuture(response);
         }
 
         if (requestHeader.getTopic() != null && requestHeader.getTopic().startsWith(MixAll.RETRY_GROUP_TOPIC_PREFIX)) {
             response.setCode(ResponseCode.MESSAGE_ILLEGAL);
             response.setRemark("batch request does not support retry group " + requestHeader.getTopic());
-            return response;
+            return CompletableFuture.completedFuture(response);
         }
         MessageExtBatch messageExtBatch = new MessageExtBatch();
         messageExtBatch.setTopic(requestHeader.getTopic());
@@ -505,7 +523,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         MessageAccessor.setProperties(messageExtBatch, MessageDecoder.string2messageProperties(requestHeader.getProperties()));
         messageExtBatch.setBody(request.getBody());
         messageExtBatch.setBornTimestamp(requestHeader.getBornTimestamp());
-        messageExtBatch.setBornHost(ctx.channel().remoteAddress());
+        messageExtBatch.setBornHost(clientHost);
         messageExtBatch.setStoreHost(this.getStoreHost());
         messageExtBatch.setReconsumeTimes(requestHeader.getReconsumeTimes() == null ? 0 : requestHeader.getReconsumeTimes());
         String clusterName = this.brokerController.getBrokerConfig().getBrokerClusterName();
@@ -532,37 +550,30 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
 
         long beginTimeMillis = this.brokerController.getMessageStore().now();
 
-        if (this.brokerController.getBrokerConfig().isAsyncSendEnable()) {
-            CompletableFuture<PutMessageResult> asyncPutMessageFuture;
-            if (isInnerBatch) {
-                asyncPutMessageFuture = this.brokerController.getMessageStore().asyncPutMessage(messageExtBatch);
-            } else {
-                asyncPutMessageFuture = this.brokerController.getMessageStore().asyncPutMessages(messageExtBatch);
-            }
-            final int finalQueueIdInt = queueIdInt;
-            asyncPutMessageFuture.thenAcceptAsync(putMessageResult -> {
-                RemotingCommand responseFuture =
-                    handlePutMessageResult(putMessageResult, response, request, messageExtBatch, responseHeader,
-                        sendMessageContext, ctx, finalQueueIdInt, beginTimeMillis, mappingContext);
-                if (responseFuture != null) {
-                    doResponse(ctx, request, responseFuture);
-                }
-                sendMessageCallback.onComplete(sendMessageContext, response);
-            }, this.brokerController.getSendMessageExecutor());
-            // Returns null to release the send message thread
-            return null;
+        CompletableFuture<PutMessageResult> asyncPutMessageFuture;
+        if (isInnerBatch) {
+            asyncPutMessageFuture = this.brokerController.getMessageStore().asyncPutMessage(messageExtBatch);
         } else {
-            PutMessageResult putMessageResult;
-            if (isInnerBatch) {
-                putMessageResult = this.brokerController.getMessageStore().putMessage(messageExtBatch);
-            } else {
-                putMessageResult = this.brokerController.getMessageStore().putMessages(messageExtBatch);
-            }
-            putMessageResult = this.brokerController.getMessageStore().putMessage(messageExtBatch);
-            handlePutMessageResult(putMessageResult, response, request, messageExtBatch, responseHeader, sendMessageContext, ctx, queueIdInt, beginTimeMillis, mappingContext);
-            sendMessageCallback.onComplete(sendMessageContext, response);
-            return response;
+            asyncPutMessageFuture = this.brokerController.getMessageStore().asyncPutMessages(messageExtBatch);
         }
+        final int finalQueueIdInt = queueIdInt;
+
+        CompletableFuture<RemotingCommand> responseReadyFuture = new CompletableFuture<>();
+
+        asyncPutMessageFuture.thenAcceptAsync(putMessageResult -> {
+            RemotingCommand resp =
+                    handlePutMessageResult(putMessageResult, response, request, messageExtBatch, responseHeader,
+                            sendMessageContext, finalQueueIdInt, beginTimeMillis, mappingContext);
+
+            // This callback must be called after writeAndFlush(response).
+            Runnable callback = () -> sendMessageCallback.onComplete(sendMessageContext, response);
+            if (resp != null) {
+                resp.setCallback(callback);
+            }
+            responseReadyFuture.complete(resp);
+        }, this.brokerController.getSendMessageExecutor());
+        // Returns null to release the send message thread
+        return responseReadyFuture;
     }
 
     private String diskUtil() {
@@ -590,8 +601,8 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         return String.format("CL: %5.2f CQ: %5.2f INDEX: %5.2f", physicRatio, logisRatio, indexRatio);
     }
 
-    private RemotingCommand preSend(ChannelHandlerContext ctx, RemotingCommand request,
-        SendMessageRequestHeader requestHeader) {
+    private RemotingCommand preSend(SocketAddress clientHost, RemotingCommand request,
+                                    SendMessageRequestHeader requestHeader) {
         final RemotingCommand response = RemotingCommand.createResponseCommand(SendMessageResponseHeader.class);
 
         response.setOpaque(request.getOpaque());
@@ -610,7 +621,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor implement
         }
 
         response.setCode(-1);
-        super.msgCheck(ctx, requestHeader, request, response);
+        super.msgCheck(clientHost, requestHeader, request, response);
 
         return response;
     }

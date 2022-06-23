@@ -156,6 +156,13 @@ public class RemotingHelper {
         }
     }
 
+    public static String simpleRemoteHost(final SocketAddress clientHost) {
+        if (null == clientHost) {
+            return "";
+        }
+        return clientHost.toString();
+    }
+
     public static String parseChannelRemoteAddr(final Channel channel) {
         if (null == channel) {
             return "";
