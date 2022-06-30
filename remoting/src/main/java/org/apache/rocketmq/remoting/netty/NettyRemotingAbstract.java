@@ -231,8 +231,10 @@ public abstract class NettyRemotingAbstract {
                                             try {
                                                 Object payload;
                                                 if (resp.getAttachment() instanceof FileRegion) {
+                                                    // zero-copy
                                                     payload = resp.getAttachment();
                                                 } else {
+                                                    // transferred by heap
                                                     payload = resp;
                                                 }
                                                 ctx.writeAndFlush(payload).addListener((ChannelFutureListener) f -> {

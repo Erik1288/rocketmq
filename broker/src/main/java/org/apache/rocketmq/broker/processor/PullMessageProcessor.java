@@ -17,9 +17,12 @@
 package org.apache.rocketmq.broker.processor;
 
 import java.net.SocketAddress;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
+import java.util.stream.Collectors;
 
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
@@ -285,7 +288,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
         if (!channelIsWritable(ctx.channel(), requestHeader)) {
             return null;
         }
-        return this.processRequest(ctx.channel().remoteAddress(), request, true);
+        return this.syncPullMessages(ctx.channel().remoteAddress(), request);
     }
 
     @Override
@@ -296,8 +299,155 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
             return CompletableFuture.completedFuture(null);
         } else {
             SocketAddress clientHost = ctx.channel().remoteAddress();
-            return this.asyncProcessRequest(clientHost, request, true);
+            return asyncPullMessages(request, clientHost, true);
         }
+    }
+
+    public CompletableFuture<RemotingCommand> asyncPullMessages(RemotingCommand request, SocketAddress clientHost, boolean brokerAllowSuspend) throws RemotingCommandException {
+        RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
+        final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
+        final PullMessageRequestHeader requestHeader = request.decodeCommandCustomHeader(PullMessageRequestHeader.class);
+
+        final boolean hasCommitOffsetFlag = PullSysFlag.hasCommitOffsetFlag(requestHeader.getSysFlag());
+        final boolean hasSubscriptionFlag = PullSysFlag.hasSubscriptionFlag(requestHeader.getSysFlag());
+        final SubscriptionGroupConfig subscriptionGroupConfig =
+                this.brokerController.getSubscriptionGroupManager().findSubscriptionGroupConfig(requestHeader.getConsumerGroup());
+
+        Result<TopicConfig> topicConfigResult = this.getTopicConfig(requestHeader.getTopic(), response, clientHost);
+        if (topicConfigResult.hasError()) {
+            return CompletableFuture.completedFuture(topicConfigResult.getError());
+        }
+
+        final TopicConfig topicConfig = topicConfigResult.getSuccess();
+
+        Result<Void> permissionResult = this.permissionChecking(topicConfig.getPerm(), request, response, responseHeader, subscriptionGroupConfig, requestHeader);
+        if (permissionResult.hasError()) {
+            return CompletableFuture.completedFuture(permissionResult.getError());
+        }
+
+        final TopicQueueMappingContext mappingContext = this.brokerController.getTopicQueueMappingManager().buildTopicQueueMappingContext(requestHeader, false);
+
+        // rewrite the request for static topic
+        Result<Void> rewriteRequest = rewriteRequest(mappingContext, requestHeader);
+        if (rewriteRequest.hasError()) {
+            return CompletableFuture.completedFuture(rewriteRequest.getError());
+        }
+
+        Result<MessageFilter> filterResult = getMessageFilter(response, responseHeader, requestHeader, clientHost, subscriptionGroupConfig, hasSubscriptionFlag, topicConfig);
+        if (filterResult.hasError()) {
+            return CompletableFuture.completedFuture(filterResult.getError());
+        }
+
+        final GetMessageResult getMessageResult = getMessageFromStore(requestHeader, clientHost, response, responseHeader, subscriptionGroupConfig, topicConfig, filterResult.getSuccess());
+
+        Result<Void> hookExecutionResult = consumeMessageBefore(request, brokerAllowSuspend, response, requestHeader, getMessageResult);
+        if (hookExecutionResult.hasError()) {
+            return CompletableFuture.completedFuture(hookExecutionResult.getError());
+        }
+
+        // rewrite the response for static topic
+        RemotingCommand rewriteResponse = rewriteResponseForStaticTopic(requestHeader, responseHeader, mappingContext, response.getCode());
+        if (rewriteResponse != null) {
+            response = rewriteResponse;
+        }
+
+        StoreReturnedResult storeReturnedResult = new StoreReturnedResult(
+                getMessageResult,
+                request,
+                requestHeader,
+                clientHost,
+                subscriptionGroupConfig,
+                brokerAllowSuspend,
+                hasCommitOffsetFlag,
+                filterResult.getSuccess(),
+                response,
+                this.brokerController.getBrokerConfig().isTransferMsgByHeap());
+
+        return handleStoreResult(storeReturnedResult);
+    }
+
+    /**
+     * Batch version.
+     */
+    public CompletableFuture<RemotingCommand> asyncBatchPullMessages(RemotingCommand request, SocketAddress clientHost, boolean brokerAllowSuspend) throws RemotingCommandException {
+        List<RemotingCommand> childRequests = RemotingCommand.parseChildRequests(request);
+
+        RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
+        final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
+
+        List<Result<StoreReturnedResult>> storeReturnedResults = new ArrayList<>(childRequests.size());
+        for (RemotingCommand childRequest : childRequests) {
+            // TODO need parallel? like childRequests.stream().parallel()
+            Result<StoreReturnedResult> storeReturnedResult = getMessageForSingleTopicQueue(childRequest, clientHost, brokerAllowSuspend);
+            storeReturnedResults.add(storeReturnedResult);
+        }
+
+        boolean hasAnyError = storeReturnedResults.stream().anyMatch(Result::hasError);
+        if (hasAnyError) {
+            response.setCode(ResponseCode.SYSTEM_ERROR);
+            response.setRemark("pulling messages in batch has error.");
+            return CompletableFuture.completedFuture(response);
+        }
+
+        List<StoreReturnedResult> storeReturnedResultList = storeReturnedResults
+                .stream()
+                .map(Result::getSuccess)
+                .collect(Collectors.toList());
+
+        return handleStoreResult(storeReturnedResultList, response);
+    }
+
+    private Result<StoreReturnedResult> getMessageForSingleTopicQueue(RemotingCommand request, SocketAddress clientHost, boolean brokerAllowSuspend) throws RemotingCommandException {
+        RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
+        final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
+
+        final PullMessageRequestHeader requestHeader = request.decodeCommandCustomHeader(PullMessageRequestHeader.class);
+
+        final boolean hasCommitOffsetFlag = PullSysFlag.hasCommitOffsetFlag(requestHeader.getSysFlag());
+        final boolean hasSubscriptionFlag = PullSysFlag.hasSubscriptionFlag(requestHeader.getSysFlag());
+        final SubscriptionGroupConfig subscriptionGroupConfig =
+                this.brokerController.getSubscriptionGroupManager().findSubscriptionGroupConfig(requestHeader.getConsumerGroup());
+
+        Result<TopicConfig> topicConfigResult = this.getTopicConfig(requestHeader.getTopic(), response, clientHost);
+        if (topicConfigResult.hasError()) {
+            return Result.error(topicConfigResult.getError());
+        }
+
+        final TopicConfig topicConfig = topicConfigResult.getSuccess();
+
+        Result<Void> permissionResult = this.permissionChecking(topicConfig.getPerm(), request, response, responseHeader, subscriptionGroupConfig, requestHeader);
+        if (permissionResult.hasError()) {
+            return Result.error(permissionResult.getError());
+        }
+
+        Result<MessageFilter> filterResult = getMessageFilter(response, responseHeader, requestHeader, clientHost, subscriptionGroupConfig, hasSubscriptionFlag, topicConfig);
+        if (filterResult.hasError()) {
+            return Result.error(filterResult.getError());
+        }
+
+        final GetMessageResult getMessageResult = getMessageFromStore(requestHeader, clientHost, response, responseHeader, subscriptionGroupConfig, topicConfig, filterResult.getSuccess());
+
+        Result<Void> hookExecutionResult = consumeMessageBefore(request, brokerAllowSuspend, response, requestHeader, getMessageResult);
+        if (hookExecutionResult.hasError()) {
+            return Result.error(hookExecutionResult.getError());
+        }
+
+        boolean transferMsgByHeap = this.brokerController.getBrokerConfig().isTransferMsgByHeap();
+        StoreReturnedResult storeReturnedResult = new StoreReturnedResult(getMessageResult, request, requestHeader, clientHost,
+                subscriptionGroupConfig, brokerAllowSuspend, hasCommitOffsetFlag, filterResult.getSuccess(), response, transferMsgByHeap);
+
+        return Result.success(storeReturnedResult);
+    }
+
+    private Result<TopicConfig> getTopicConfig(String topic, RemotingCommand response, SocketAddress clientHost) {
+        final TopicConfig topicConfig = this.brokerController.getTopicConfigManager().selectTopicConfig(topic);
+        if (null == topicConfig) {
+            LOGGER.error("the topic {} not exist, consumer: {}", topic, RemotingHelper.simpleRemoteHost(clientHost));
+            response.setCode(ResponseCode.TOPIC_NOT_EXIST);
+            response.setRemark(String.format("topic[%s] not exist, apply first please! %s", topic, FAQUrl.suggestTodo(FAQUrl.APPLY_TOPIC_URL)));
+            return Result.error(response);
+        }
+        return Result.success(topicConfig);
     }
 
     @Override
@@ -309,10 +459,21 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
         return false;
     }
 
-    private RemotingCommand processRequest(SocketAddress clientHost, RemotingCommand request, boolean brokerAllowSuspend)
+    /**
+     * Pull messages in sync mode.
+     * Will no longer support long-polling in sync mode.
+     * @param clientHost remote address
+     * @param request request
+     * @return response
+     * @throws RemotingCommandException
+     */
+    public RemotingCommand syncPullMessages(SocketAddress clientHost, RemotingCommand request)
             throws RemotingCommandException {
         try {
-            return asyncProcessRequest(clientHost, request, brokerAllowSuspend).get();
+            CompletableFuture<RemotingCommand> future = asyncPullMessages(request, clientHost, false);
+            // the future must be done since suspend is not allowed in sync pull mode.
+            assert future.isDone();
+            return future.get();
         } catch (InterruptedException e) {
             e.printStackTrace();
         } catch (ExecutionException e) {
@@ -332,12 +493,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
         return true;
     }
 
-    private CompletableFuture<RemotingCommand> asyncProcessRequest(SocketAddress clientHost, RemotingCommand request, boolean brokerAllowSuspend)
-        throws RemotingCommandException {
-        RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
-        final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
-        final PullMessageRequestHeader requestHeader = request.decodeCommandCustomHeader(PullMessageRequestHeader.class);
-
+    private Result<Void> permissionChecking(int topicPerm, RemotingCommand request, RemotingCommand response, PullMessageResponseHeader responseHeader, SubscriptionGroupConfig subscriptionGroupConfig, PullMessageRequestHeader requestHeader) {
         response.setOpaque(request.getOpaque());
 
         LOGGER.debug("receive PullMessage request command, {}", request);
@@ -345,66 +501,56 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
         if (!PermName.isReadable(this.brokerController.getBrokerConfig().getBrokerPermission())) {
             response.setCode(ResponseCode.NO_PERMISSION);
             response.setRemark(String.format("the broker[%s] pulling message is forbidden", this.brokerController.getBrokerConfig().getBrokerIP1()));
-            return CompletableFuture.completedFuture(response);
+            return Result.error(response);
         }
 
         if (request.getCode() == RequestCode.LITE_PULL_MESSAGE && !this.brokerController.getBrokerConfig().isLitePullMessageEnable()) {
             response.setCode(ResponseCode.NO_PERMISSION);
             response.setRemark(
                 "the broker[" + this.brokerController.getBrokerConfig().getBrokerIP1() + "] for lite pull consumer is forbidden");
-            return CompletableFuture.completedFuture(response);
+            return Result.error(response);
         }
 
-        SubscriptionGroupConfig subscriptionGroupConfig =
-            this.brokerController.getSubscriptionGroupManager().findSubscriptionGroupConfig(requestHeader.getConsumerGroup());
         if (null == subscriptionGroupConfig) {
             response.setCode(ResponseCode.SUBSCRIPTION_GROUP_NOT_EXIST);
             response.setRemark(String.format("subscription group [%s] does not exist, %s", requestHeader.getConsumerGroup(), FAQUrl.suggestTodo(FAQUrl.SUBSCRIPTION_GROUP_NOT_EXIST)));
-            return CompletableFuture.completedFuture(response);
+            return Result.error(response);
         }
 
         if (!subscriptionGroupConfig.isConsumeEnable()) {
             response.setCode(ResponseCode.NO_PERMISSION);
             responseHeader.setForbiddenType(ForbiddenType.GROUP_FORBIDDEN);
             response.setRemark("subscription group no permission, " + requestHeader.getConsumerGroup());
-            return CompletableFuture.completedFuture(response);
+            return Result.error(response);
         }
 
-        final boolean hasSuspendFlag = PullSysFlag.hasSuspendFlag(requestHeader.getSysFlag());
-        final boolean hasCommitOffsetFlag = PullSysFlag.hasCommitOffsetFlag(requestHeader.getSysFlag());
-        final boolean hasSubscriptionFlag = PullSysFlag.hasSubscriptionFlag(requestHeader.getSysFlag());
-
-        TopicConfig topicConfig = this.brokerController.getTopicConfigManager().selectTopicConfig(requestHeader.getTopic());
-        if (null == topicConfig) {
-            LOGGER.error("the topic {} not exist, consumer: {}", requestHeader.getTopic(), RemotingHelper.simpleRemoteHost(clientHost));
-            response.setCode(ResponseCode.TOPIC_NOT_EXIST);
-            response.setRemark(String.format("topic[%s] not exist, apply first please! %s", requestHeader.getTopic(), FAQUrl.suggestTodo(FAQUrl.APPLY_TOPIC_URL)));
-            return CompletableFuture.completedFuture(response);
-        }
-
-        if (!PermName.isReadable(topicConfig.getPerm())) {
+        if (!PermName.isReadable(topicPerm)) {
             response.setCode(ResponseCode.NO_PERMISSION);
             responseHeader.setForbiddenType(ForbiddenType.TOPIC_FORBIDDEN);
             response.setRemark("the topic[" + requestHeader.getTopic() + "] pulling message is forbidden");
-            return CompletableFuture.completedFuture(response);
+            return Result.error(response);
         }
 
-        TopicQueueMappingContext mappingContext = this.brokerController.getTopicQueueMappingManager().buildTopicQueueMappingContext(requestHeader, false);
+        return Result.success(null);
+    }
 
-        {
-            RemotingCommand rewriteResult = rewriteRequestForStaticTopic(requestHeader, mappingContext);
-            if (rewriteResult != null) {
-                return CompletableFuture.completedFuture(rewriteResult);
-            }
+    private Result<Void> rewriteRequest(TopicQueueMappingContext mappingContext, PullMessageRequestHeader requestHeader) {
+        RemotingCommand errorResponse = rewriteRequestForStaticTopic(requestHeader, mappingContext);
+        if (errorResponse != null) {
+            return Result.error(errorResponse);
+        } else {
+            return Result.success(null);
         }
+    }
 
+    private Result<MessageFilter> getMessageFilter(RemotingCommand response, PullMessageResponseHeader responseHeader, PullMessageRequestHeader requestHeader, SocketAddress clientHost, SubscriptionGroupConfig subscriptionGroupConfig, boolean hasSubscriptionFlag, TopicConfig topicConfig) {
         if (requestHeader.getQueueId() < 0 || requestHeader.getQueueId() >= topicConfig.getReadQueueNums()) {
             String errorInfo = String.format("queueId[%d] is illegal, topic:[%s] topicConfig.readQueueNums:[%d] consumer:[%s]",
                 requestHeader.getQueueId(), requestHeader.getTopic(), topicConfig.getReadQueueNums(), clientHost);
             LOGGER.warn(errorInfo);
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark(errorInfo);
-            return CompletableFuture.completedFuture(response);
+            return Result.error(response);
         }
 
         SubscriptionData subscriptionData = null;
@@ -426,7 +572,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                     requestHeader.getConsumerGroup());
                 response.setCode(ResponseCode.SUBSCRIPTION_PARSE_FAILED);
                 response.setRemark("parse the consumer's subscription failed");
-                return CompletableFuture.completedFuture(response);
+                return Result.error(response);
             }
         } else {
             ConsumerGroupInfo consumerGroupInfo =
@@ -435,7 +581,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 LOGGER.warn("the consumer's group info not exist, group: {}", requestHeader.getConsumerGroup());
                 response.setCode(ResponseCode.SUBSCRIPTION_NOT_EXIST);
                 response.setRemark("the consumer's group info not exist" + FAQUrl.suggestTodo(FAQUrl.SAME_GROUP_DIFFERENT_TOPIC));
-                return CompletableFuture.completedFuture(response);
+                return Result.error(response);
             }
 
             if (!subscriptionGroupConfig.isConsumeBroadcastEnable()
@@ -443,7 +589,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 response.setCode(ResponseCode.NO_PERMISSION);
                 responseHeader.setForbiddenType(ForbiddenType.BROADCASTING_DISABLE_FORBIDDEN);
                 response.setRemark("the consumer group[" + requestHeader.getConsumerGroup() + "] can not consume by broadcast way");
-                return CompletableFuture.completedFuture(response);
+                return Result.error(response);
             }
 
             boolean readForbidden = this.brokerController.getSubscriptionGroupManager().getForbidden(//
@@ -452,7 +598,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 response.setCode(ResponseCode.NO_PERMISSION);
                 responseHeader.setForbiddenType(ForbiddenType.SUBSCRIPTION_FORBIDDEN);
                 response.setRemark("the consumer group[" + requestHeader.getConsumerGroup() + "] is forbidden for topic[" + requestHeader.getTopic() + "]");
-                return CompletableFuture.completedFuture(response);
+                return Result.error(response);
             }
 
             subscriptionData = consumerGroupInfo.findSubscriptionData(requestHeader.getTopic());
@@ -460,7 +606,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 LOGGER.warn("the consumer's subscription not exist, group: {}, topic:{}", requestHeader.getConsumerGroup(), requestHeader.getTopic());
                 response.setCode(ResponseCode.SUBSCRIPTION_NOT_EXIST);
                 response.setRemark("the consumer's subscription not exist" + FAQUrl.suggestTodo(FAQUrl.SAME_GROUP_DIFFERENT_TOPIC));
-                return CompletableFuture.completedFuture(response);
+                return Result.error(response);
             }
 
             if (subscriptionData.getSubVersion() < requestHeader.getSubVersion()) {
@@ -468,7 +614,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                     subscriptionData.getSubString());
                 response.setCode(ResponseCode.SUBSCRIPTION_NOT_LATEST);
                 response.setRemark("the consumer's subscription not latest");
-                return CompletableFuture.completedFuture(response);
+                return Result.error(response);
             }
             if (!ExpressionType.isTagType(subscriptionData.getExpressionType())) {
                 consumerFilterData = this.brokerController.getConsumerFilterManager().get(requestHeader.getTopic(),
@@ -476,14 +622,14 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 if (consumerFilterData == null) {
                     response.setCode(ResponseCode.FILTER_DATA_NOT_EXIST);
                     response.setRemark("The broker's consumer filter data is not exist!Your expression may be wrong!");
-                    return CompletableFuture.completedFuture(response);
+                    return Result.error(response);
                 }
                 if (consumerFilterData.getClientVersion() < requestHeader.getSubVersion()) {
                     LOGGER.warn("The broker's consumer filter data is not latest, group: {}, topic: {}, serverV: {}, clientV: {}",
                         requestHeader.getConsumerGroup(), requestHeader.getTopic(), consumerFilterData.getClientVersion(), requestHeader.getSubVersion());
                     response.setCode(ResponseCode.FILTER_DATA_NOT_LATEST);
                     response.setRemark("the consumer's consumer filter data not latest");
-                    return CompletableFuture.completedFuture(response);
+                    return Result.error(response);
                 }
             }
         }
@@ -492,23 +638,26 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
             && !this.brokerController.getBrokerConfig().isEnablePropertyFilter()) {
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark("The broker does not support consumer to filter message by " + subscriptionData.getExpressionType());
-            return CompletableFuture.completedFuture(response);
+            return Result.error(response);
         }
 
         MessageFilter messageFilter;
         if (this.brokerController.getBrokerConfig().isFilterSupportRetry()) {
             messageFilter = new ExpressionForRetryMessageFilter(subscriptionData, consumerFilterData,
-                this.brokerController.getConsumerFilterManager());
+                    this.brokerController.getConsumerFilterManager());
         } else {
             messageFilter = new ExpressionMessageFilter(subscriptionData, consumerFilterData,
-                this.brokerController.getConsumerFilterManager());
+                    this.brokerController.getConsumerFilterManager());
         }
 
+        return Result.success(messageFilter);
+    }
+
+    public GetMessageResult getMessageFromStore(PullMessageRequestHeader requestHeader, SocketAddress clientHost, RemotingCommand response, PullMessageResponseHeader responseHeader, SubscriptionGroupConfig subscriptionGroupConfig, TopicConfig topicConfig, MessageFilter messageFilter) {
         final GetMessageResult getMessageResult =
             this.brokerController.getMessageStore().getMessage(requestHeader.getConsumerGroup(), requestHeader.getTopic(),
                 requestHeader.getQueueId(), requestHeader.getQueueOffset(), requestHeader.getMaxMsgNums(), messageFilter);
 
-        PullMessageResult pullMessageResult = null;
         if (getMessageResult != null) {
             response.setRemark(getMessageResult.getStatus().name());
             responseHeader.setNextBeginOffset(getMessageResult.getNextBeginOffset());
@@ -531,11 +680,11 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                         response.setCode(ResponseCode.PULL_OFFSET_MOVED);
                         // XXX: warn and notify me
                         LOGGER.info("the broker stores no queue data, fix the request offset {} to {}, Topic: {} QueueId: {} Consumer Group: {}",
-                            requestHeader.getQueueOffset(),
-                            getMessageResult.getNextBeginOffset(),
-                            requestHeader.getTopic(),
-                            requestHeader.getQueueId(),
-                            requestHeader.getConsumerGroup()
+                                requestHeader.getQueueOffset(),
+                                getMessageResult.getNextBeginOffset(),
+                                requestHeader.getTopic(),
+                                requestHeader.getQueueId(),
+                                requestHeader.getConsumerGroup()
                         );
                     } else {
                         response.setCode(ResponseCode.PULL_NOT_FOUND);
@@ -551,7 +700,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                     response.setCode(ResponseCode.PULL_OFFSET_MOVED);
                     // XXX: warn and notify me
                     LOGGER.info("the request offset: {} over flow badly, fix to {}, broker max offset: {}, consumer: {}",
-                        requestHeader.getQueueOffset(), getMessageResult.getNextBeginOffset(), getMessageResult.getMaxOffset(), clientHost);
+                            requestHeader.getQueueOffset(), getMessageResult.getNextBeginOffset(), getMessageResult.getMaxOffset(), clientHost);
                     break;
                 case OFFSET_OVERFLOW_ONE:
                     response.setCode(ResponseCode.PULL_NOT_FOUND);
@@ -559,8 +708,8 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 case OFFSET_TOO_SMALL:
                     response.setCode(ResponseCode.PULL_OFFSET_MOVED);
                     LOGGER.info("the request offset too small. group={}, topic={}, requestOffset={}, brokerMinOffset={}, clientIp={}",
-                        requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueOffset(),
-                        getMessageResult.getMinOffset(), clientHost);
+                            requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueOffset(),
+                            getMessageResult.getMinOffset(), clientHost);
                     break;
                 default:
                     assert false;
@@ -583,12 +732,12 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
             if (this.brokerController.getBrokerConfig().getBrokerId() != MixAll.MASTER_ID && !getMessageResult.isSuggestPullingFromSlave()) {
                 if (this.brokerController.getMinBrokerIdInGroup() == MixAll.MASTER_ID) {
                     LOGGER.debug("slave redirect pullRequest to master, topic: {}, queueId: {}, consumer group: {}, next: {}, min: {}, max: {}",
-                        requestHeader.getTopic(),
-                        requestHeader.getQueueId(),
-                        requestHeader.getConsumerGroup(),
-                        responseHeader.getNextBeginOffset(),
-                        responseHeader.getMinOffset(),
-                        responseHeader.getMaxOffset()
+                            requestHeader.getTopic(),
+                            requestHeader.getQueueId(),
+                            requestHeader.getConsumerGroup(),
+                            responseHeader.getNextBeginOffset(),
+                            responseHeader.getMinOffset(),
+                            responseHeader.getMaxOffset()
                     );
                     responseHeader.setSuggestWhichBrokerId(MixAll.MASTER_ID);
                     if (!getMessageResult.getStatus().equals(GetMessageStatus.FOUND)) {
@@ -596,53 +745,48 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                     }
                 }
             }
+        } else {
+            response.setCode(ResponseCode.SYSTEM_ERROR);
+            response.setRemark("store getMessage return null");
+        }
+        return getMessageResult;
+    }
 
-            if (this.hasConsumeMessageHook()) {
-                String owner = request.getExtFields().get(BrokerStatsManager.COMMERCIAL_OWNER);
-                String authType = request.getExtFields().get(BrokerStatsManager.ACCOUNT_AUTH_TYPE);
-                String ownerParent = request.getExtFields().get(BrokerStatsManager.ACCOUNT_OWNER_PARENT);
-                String ownerSelf = request.getExtFields().get(BrokerStatsManager.ACCOUNT_OWNER_SELF);
+    private Result<Void> consumeMessageBefore(RemotingCommand request, boolean brokerAllowSuspend, RemotingCommand response, PullMessageRequestHeader requestHeader, GetMessageResult getMessageResult) {
+        if (this.hasConsumeMessageHook() && getMessageResult != null) {
+            String owner = request.getExtFields().get(BrokerStatsManager.COMMERCIAL_OWNER);
+            String authType = request.getExtFields().get(BrokerStatsManager.ACCOUNT_AUTH_TYPE);
+            String ownerParent = request.getExtFields().get(BrokerStatsManager.ACCOUNT_OWNER_PARENT);
+            String ownerSelf = request.getExtFields().get(BrokerStatsManager.ACCOUNT_OWNER_SELF);
 
-                ConsumeMessageContext context = new ConsumeMessageContext();
-                context.setConsumerGroup(requestHeader.getConsumerGroup());
-                context.setTopic(requestHeader.getTopic());
-                context.setQueueId(requestHeader.getQueueId());
-                context.setAccountAuthType(authType);
-                context.setAccountOwnerParent(ownerParent);
-                context.setAccountOwnerSelf(ownerSelf);
-                context.setNamespace(NamespaceUtil.getNamespaceFromResource(requestHeader.getTopic()));
+            ConsumeMessageContext context = new ConsumeMessageContext();
+            context.setConsumerGroup(requestHeader.getConsumerGroup());
+            context.setTopic(requestHeader.getTopic());
+            context.setQueueId(requestHeader.getQueueId());
+            context.setAccountAuthType(authType);
+            context.setAccountOwnerParent(ownerParent);
+            context.setAccountOwnerSelf(ownerSelf);
+            context.setNamespace(NamespaceUtil.getNamespaceFromResource(requestHeader.getTopic()));
 
-                switch (response.getCode()) {
-                    case ResponseCode.SUCCESS:
-                        int commercialBaseCount = brokerController.getBrokerConfig().getCommercialBaseCount();
-                        int incValue = getMessageResult.getMsgCount4Commercial() * commercialBaseCount;
+            switch (response.getCode()) {
+                case ResponseCode.SUCCESS:
+                    int commercialBaseCount = brokerController.getBrokerConfig().getCommercialBaseCount();
+                    int incValue = getMessageResult.getMsgCount4Commercial() * commercialBaseCount;
 
-                        context.setCommercialRcvStats(BrokerStatsManager.StatsType.RCV_SUCCESS);
-                        context.setCommercialRcvTimes(incValue);
-                        context.setCommercialRcvSize(getMessageResult.getBufferTotalSize());
-                        context.setCommercialOwner(owner);
+                    context.setCommercialRcvStats(BrokerStatsManager.StatsType.RCV_SUCCESS);
+                    context.setCommercialRcvTimes(incValue);
+                    context.setCommercialRcvSize(getMessageResult.getBufferTotalSize());
+                    context.setCommercialOwner(owner);
 
-                        context.setRcvStat(BrokerStatsManager.StatsType.RCV_SUCCESS);
-                        context.setRcvMsgNum(getMessageResult.getMessageCount());
-                        context.setRcvMsgSize(getMessageResult.getBufferTotalSize());
-                        context.setCommercialRcvMsgNum(getMessageResult.getMsgCount4Commercial());
+                    context.setRcvStat(BrokerStatsManager.StatsType.RCV_SUCCESS);
+                    context.setRcvMsgNum(getMessageResult.getMessageCount());
+                    context.setRcvMsgSize(getMessageResult.getBufferTotalSize());
+                    context.setCommercialRcvMsgNum(getMessageResult.getMsgCount4Commercial());
 
-                        break;
-                    case ResponseCode.PULL_NOT_FOUND:
-                        if (!brokerAllowSuspend) {
+                    break;
+                case ResponseCode.PULL_NOT_FOUND:
+                    if (!brokerAllowSuspend) {
 
-                            context.setCommercialRcvStats(BrokerStatsManager.StatsType.RCV_EPOLLS);
-                            context.setCommercialRcvTimes(1);
-                            context.setCommercialOwner(owner);
-
-                            context.setRcvStat(BrokerStatsManager.StatsType.RCV_EPOLLS);
-                            context.setRcvMsgNum(0);
-                            context.setRcvMsgSize(0);
-                            context.setCommercialRcvMsgNum(0);
-                        }
-                        break;
-                    case ResponseCode.PULL_RETRY_IMMEDIATELY:
-                    case ResponseCode.PULL_OFFSET_MOVED:
                         context.setCommercialRcvStats(BrokerStatsManager.StatsType.RCV_EPOLLS);
                         context.setCommercialRcvTimes(1);
                         context.setCommercialOwner(owner);
@@ -651,65 +795,79 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                         context.setRcvMsgNum(0);
                         context.setRcvMsgSize(0);
                         context.setCommercialRcvMsgNum(0);
-                        break;
-                    default:
-                        assert false;
-                        break;
-                }
+                    }
+                    break;
+                case ResponseCode.PULL_RETRY_IMMEDIATELY:
+                case ResponseCode.PULL_OFFSET_MOVED:
+                    context.setCommercialRcvStats(BrokerStatsManager.StatsType.RCV_EPOLLS);
+                    context.setCommercialRcvTimes(1);
+                    context.setCommercialOwner(owner);
 
-                try {
-                    this.executeConsumeMessageHookBefore(context);
-                } catch (AbortProcessException e) {
-                    response.setCode(e.getResponseCode());
-                    response.setRemark(e.getErrorMessage());
-                    return CompletableFuture.completedFuture(response);
-                }
+                    context.setRcvStat(BrokerStatsManager.StatsType.RCV_EPOLLS);
+                    context.setRcvMsgNum(0);
+                    context.setRcvMsgSize(0);
+                    context.setCommercialRcvMsgNum(0);
+                    break;
+                default:
+                    assert false;
+                    break;
             }
 
-            //rewrite the response for the
-            RemotingCommand rewriteResult = rewriteResponseForStaticTopic(requestHeader, responseHeader, mappingContext, response.getCode());
-            if (rewriteResult != null) {
-                response = rewriteResult;
+            try {
+                this.executeConsumeMessageHookBefore(context);
+            } catch (AbortProcessException e) {
+                response.setCode(e.getResponseCode());
+                response.setRemark(e.getErrorMessage());
+                return Result.error(response);
             }
-
-            pullMessageResult = this.pullMessageResultHandler.handle(
-                getMessageResult,
-                request,
-                requestHeader,
-                clientHost,
-                subscriptionData,
-                subscriptionGroupConfig,
-                brokerAllowSuspend,
-                messageFilter,
-                response);
-        } else {
-            response.setCode(ResponseCode.SYSTEM_ERROR);
-            response.setRemark("store getMessage return null");
         }
+        return Result.success(null);
+    }
 
+    private CompletableFuture<RemotingCommand> handleStoreResult(StoreReturnedResult storeReturnedResult) {
+        PullMessageResult pullMessageResult = this.pullMessageResultHandler.handle(storeReturnedResult);
+
+        commitOffsetIfNecessary(
+                storeReturnedResult.getClientHost(),
+                storeReturnedResult.isBrokerAllowSuspend(),
+                storeReturnedResult.getRequestHeader(),
+                storeReturnedResult.isHasCommitOffsetFlag());
+
+        if (pullMessageResult.isAsyncResponse()) {
+            // async result. i.e. Long-polling
+            return pullMessageResult.getAsyncResponse();
+        } else {
+            // sync result.
+            return CompletableFuture.completedFuture(storeReturnedResult.getResponse());
+        }
+    }
+
+    private CompletableFuture<RemotingCommand> handleStoreResult(List<StoreReturnedResult> storeReturnedResultList, RemotingCommand response) {
+        PullMessageResult pullMessageResult = this.pullMessageResultHandler.handle(storeReturnedResultList, response);
+        StoreReturnedResult storeReturnedResult = storeReturnedResultList.get(0);
+
+        commitOffsetIfNecessary(
+                storeReturnedResult.getClientHost(),
+                storeReturnedResult.isBrokerAllowSuspend(),
+                storeReturnedResult.getRequestHeader(),
+                storeReturnedResult.isHasCommitOffsetFlag());
+
+        if (pullMessageResult.isAsyncResponse()) {
+            // async result. i.e. Long-polling
+            return pullMessageResult.getAsyncResponse();
+        } else {
+            // sync result.
+            return CompletableFuture.completedFuture(storeReturnedResult.getResponse());
+        }
+    }
+
+    private void commitOffsetIfNecessary(SocketAddress clientHost, boolean brokerAllowSuspend, PullMessageRequestHeader requestHeader, boolean hasCommitOffsetFlag) {
         boolean storeOffsetEnable = brokerAllowSuspend;
         storeOffsetEnable = storeOffsetEnable && hasCommitOffsetFlag;
         if (storeOffsetEnable) {
             this.brokerController.getConsumerOffsetManager().commitOffset(RemotingHelper.simpleRemoteHost(clientHost),
                 requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueId(), requestHeader.getCommitOffset());
         }
-
-        CompletableFuture<RemotingCommand> future;
-
-        if (pullMessageResult != null) {
-            // The response has been handled by pullMessageResultHandler.
-            if (pullMessageResult.isAsyncResponse()) {
-                // Long-polling result
-                future = pullMessageResult.getAsyncResponse();
-            } else {
-                // Even the response is sync result, it may be modified by pullMessageResultHandler.
-                response = pullMessageResult.getSyncResponse();
-                future = CompletableFuture.completedFuture(response);
-            }
-        } else {
-            future = CompletableFuture.completedFuture(response);
-        }
-        return future;
     }
 
     public boolean hasConsumeMessageHook() {
@@ -729,10 +887,10 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
     public void executeRequestWhenWakeup(final PullRequest pullRequest) {
         Runnable run = () -> {
             try {
-                final RemotingCommand response = PullMessageProcessor.this.processRequest(
+                final RemotingCommand response = PullMessageProcessor.this.syncPullMessages(
                         pullRequest.getClientHost(),
-                        pullRequest.getRequestCommand(),
-                        false);
+                        pullRequest.getRequestCommand()
+                );
 
                 if (response != null) {
                     response.setOpaque(pullRequest.getRequestCommand().getOpaque());

@@ -237,4 +237,6 @@ public class RequestCode {
     public static final int GET_BROKER_HA_STATUS = 907;
 
     public static final int RESET_MASTER_FLUSH_OFFSET = 908;
+
+    public static final int COMMON_BATCH_REQUEST = 666;
 }

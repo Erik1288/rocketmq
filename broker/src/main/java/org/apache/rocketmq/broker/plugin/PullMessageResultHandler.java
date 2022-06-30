@@ -18,38 +18,27 @@
 package org.apache.rocketmq.broker.plugin;
 
 import org.apache.rocketmq.broker.processor.PullMessageResult;
-import org.apache.rocketmq.common.protocol.header.PullMessageRequestHeader;
-import org.apache.rocketmq.common.protocol.heartbeat.SubscriptionData;
-import org.apache.rocketmq.common.subscription.SubscriptionGroupConfig;
+import org.apache.rocketmq.broker.processor.StoreReturnedResult;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
-import org.apache.rocketmq.store.GetMessageResult;
-import org.apache.rocketmq.store.MessageFilter;
 
-import java.net.SocketAddress;
+import java.util.List;
 
 public interface PullMessageResultHandler {
 
     /**
      * Handle result of get message from store.
      *
-     * @param getMessageResult store result
-     * @param request request
-     * @param requestHeader request header
-     * @param clientHost
-     * @param subscriptionData sub data
-     * @param subscriptionGroupConfig sub config
-     * @param brokerAllowSuspend brokerAllowSuspend
-     * @param messageFilter store message filter
-     * @param response response
+     * @param storeReturnedResult
      * @return new pull message result
      */
-    PullMessageResult handle(final GetMessageResult getMessageResult,
-                             final RemotingCommand request,
-                             final PullMessageRequestHeader requestHeader,
-                             final SocketAddress clientHost,
-                             final SubscriptionData subscriptionData,
-                             final SubscriptionGroupConfig subscriptionGroupConfig,
-                             final boolean brokerAllowSuspend,
-                             final MessageFilter messageFilter,
-                             final RemotingCommand response);
+    PullMessageResult handle(StoreReturnedResult storeReturnedResult);
+
+    /**
+     * Handle result of get message from store.
+     *
+     * @param storeReturnedResults
+     * @param response
+     * @return new pull message result
+     */
+    PullMessageResult handle(List<StoreReturnedResult> storeReturnedResults, RemotingCommand response);
 }

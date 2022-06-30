@@ -16,8 +16,6 @@
  */
 package org.apache.rocketmq.broker.longpolling;
 
-import io.netty.channel.Channel;
-import org.apache.rocketmq.common.protocol.heartbeat.SubscriptionData;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 import org.apache.rocketmq.store.MessageFilter;
 
@@ -30,19 +28,16 @@ public class PullRequest {
     private final long timeoutMillis;
     private final long suspendTimestamp;
     private final long pullFromThisOffset;
-    private final SubscriptionData subscriptionData;
     private final MessageFilter messageFilter;
     private final CompletableFuture<RemotingCommand> future;
 
     public PullRequest(RemotingCommand requestCommand, SocketAddress clientHost, long timeoutMillis, long suspendTimestamp,
-        long pullFromThisOffset, SubscriptionData subscriptionData,
-        MessageFilter messageFilter, CompletableFuture<RemotingCommand> future) {
+        long pullFromThisOffset, MessageFilter messageFilter, CompletableFuture<RemotingCommand> future) {
         this.requestCommand = requestCommand;
         this.clientHost = clientHost;
         this.timeoutMillis = timeoutMillis;
         this.suspendTimestamp = suspendTimestamp;
         this.pullFromThisOffset = pullFromThisOffset;
-        this.subscriptionData = subscriptionData;
         this.messageFilter = messageFilter;
         this.future = future;
     }
@@ -65,10 +60,6 @@ public class PullRequest {
 
     public long getPullFromThisOffset() {
         return pullFromThisOffset;
-    }
-
-    public SubscriptionData getSubscriptionData() {
-        return subscriptionData;
     }
 
     public MessageFilter getMessageFilter() {

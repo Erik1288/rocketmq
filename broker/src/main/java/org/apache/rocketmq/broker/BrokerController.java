@@ -75,6 +75,7 @@ import org.apache.rocketmq.broker.processor.AckMessageProcessor;
 import org.apache.rocketmq.broker.processor.AdminBrokerProcessor;
 import org.apache.rocketmq.broker.processor.ChangeInvisibleTimeProcessor;
 import org.apache.rocketmq.broker.processor.ClientManageProcessor;
+import org.apache.rocketmq.broker.processor.CommonBatchProcessor;
 import org.apache.rocketmq.broker.processor.ConsumerManageProcessor;
 import org.apache.rocketmq.broker.processor.EndTransactionProcessor;
 import org.apache.rocketmq.broker.processor.NotificationProcessor;
@@ -225,6 +226,7 @@ public class BrokerController {
     protected ExecutorService clientManageExecutor;
     protected ExecutorService heartbeatExecutor;
     protected ExecutorService consumerManageExecutor;
+    protected ExecutorService commonBatchExecutor;
     protected ExecutorService loadBalanceExecutor;
     protected ExecutorService endTransactionExecutor;
     protected boolean updateMasterHAServerAddrPeriodically = false;
@@ -422,6 +424,14 @@ public class BrokerController {
             TimeUnit.MILLISECONDS,
             this.sendThreadPoolQueue,
             new ThreadFactoryImpl("SendMessageThread_", getBrokerIdentity()));
+
+        this.commonBatchExecutor = new BrokerFixedThreadPoolExecutor(
+                this.brokerConfig.getSendMessageThreadPoolNums(),
+                this.brokerConfig.getSendMessageThreadPoolNums(),
+                1000 * 60,
+                TimeUnit.MILLISECONDS,
+                this.sendThreadPoolQueue,
+                new ThreadFactoryImpl("CommonBatchThread_", getBrokerIdentity()));
 
         this.pullMessageExecutor = new BrokerFixedThreadPoolExecutor(
             this.brokerConfig.getPullMessageThreadPoolNums(),
@@ -1008,6 +1018,9 @@ public class BrokerController {
          */
         this.remotingServer.registerProcessor(RequestCode.END_TRANSACTION, new EndTransactionProcessor(this), this.endTransactionExecutor);
         this.fastRemotingServer.registerProcessor(RequestCode.END_TRANSACTION, new EndTransactionProcessor(this), this.endTransactionExecutor);
+
+        CommonBatchProcessor commonBatchProcessor = new CommonBatchProcessor(sendMessageProcessor, pullMessageProcessor, consumerManageProcessor);
+        this.remotingServer.registerProcessor(RequestCode.COMMON_BATCH_REQUEST, commonBatchProcessor, this.commonBatchExecutor);
 
         /*
          * Default

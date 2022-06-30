@@ -19,8 +19,10 @@ package org.apache.rocketmq.broker.processor;
 
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.longpolling.PullRequest;
+import org.apache.rocketmq.broker.pagecache.BatchManyMessageTransfer;
 import org.apache.rocketmq.broker.pagecache.ManyMessageTransfer;
 import org.apache.rocketmq.broker.plugin.PullMessageResultHandler;
+import org.apache.rocketmq.common.Pair;
 import org.apache.rocketmq.common.TopicFilterType;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.common.message.MessageDecoder;
@@ -28,7 +30,6 @@ import org.apache.rocketmq.common.message.MessageQueue;
 import org.apache.rocketmq.common.protocol.ResponseCode;
 import org.apache.rocketmq.common.protocol.header.PullMessageRequestHeader;
 import org.apache.rocketmq.common.protocol.header.PullMessageResponseHeader;
-import org.apache.rocketmq.common.protocol.heartbeat.SubscriptionData;
 import org.apache.rocketmq.common.protocol.topic.OffsetMovedEvent;
 import org.apache.rocketmq.common.subscription.SubscriptionGroupConfig;
 import org.apache.rocketmq.common.sysflag.MessageSysFlag;
@@ -48,6 +49,7 @@ import java.net.SocketAddress;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 
 public class DefaultPullMessageResultHandler implements PullMessageResultHandler {
 
@@ -59,15 +61,113 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
     }
 
     @Override
-    public PullMessageResult handle(final GetMessageResult getMessageResult,
-                                    final RemotingCommand request,
-                                    final PullMessageRequestHeader requestHeader,
-                                    final SocketAddress clientHost,
-                                    final SubscriptionData subscriptionData,
-                                    final SubscriptionGroupConfig subscriptionGroupConfig,
-                                    final boolean brokerAllowSuspend,
-                                    final MessageFilter messageFilter,
-                                    RemotingCommand response) {
+    public PullMessageResult handle(List<StoreReturnedResult> storeReturnedResults, RemotingCommand response) {
+        PullMessageResult globalPullMessageResult = new PullMessageResult();
+
+        List<Pair<StoreReturnedResult, PullMessageResult>> pullMessageResults = storeReturnedResults
+                .stream()
+                .map(storeReturnedResult -> new Pair<>(storeReturnedResult, handle(storeReturnedResult)))
+                .collect(Collectors.toList());
+
+        List<Pair<StoreReturnedResult, PullMessageResult>> pullMessageResultsWithData = pullMessageResults
+                .stream()
+                .filter(pair -> !pair.getObject2().isAsyncResponse())
+                .collect(Collectors.toList());
+
+        StoreReturnedResult sample = storeReturnedResults.get(0);
+        boolean allHaveInsufficientData = pullMessageResultsWithData.size() == 0;
+        boolean zeroCopy = !sample.isTransferMsgByHeap();
+        boolean brokerAllowSuspend = sample.isBrokerAllowSuspend();
+
+        if (allHaveInsufficientData) {
+            // global long-polling
+            final boolean hasSuspendFlag = PullSysFlag.hasSuspendFlag(sample.getRequestHeader().getSysFlag());
+            final long suspendTimeoutMillisLong = hasSuspendFlag ? sample.getRequestHeader().getSuspendTimeoutMillis() : 0;
+
+            if (brokerAllowSuspend && hasSuspendFlag) {
+                long pollingTimeMills = suspendTimeoutMillisLong;
+                if (!this.brokerController.getBrokerConfig().isLongPollingEnable()) {
+                    pollingTimeMills = this.brokerController.getBrokerConfig().getShortPollingTimeMills();
+                }
+                // the shared pull future.
+                CompletableFuture<RemotingCommand> pullFuture = new CompletableFuture<>();
+
+                final long finalPollingTimeMills = pollingTimeMills;
+                List<Pair<StoreReturnedResult, PullRequest>> pullRequests = pullMessageResults
+                        .stream()
+                        .map(pair -> {
+                            PullRequest pullRequest = new PullRequest(
+                                    pair.getObject1().getRequest(),
+                                    pair.getObject1().getClientHost(),
+                                    finalPollingTimeMills,
+                                    DefaultPullMessageResultHandler.this.brokerController.getMessageStore().now(),
+                                    pair.getObject1().getRequestHeader().getQueueOffset(),
+                                    pair.getObject1().getMessageFilter(),
+                                    pullFuture
+                            );
+                            return new Pair<>(pair.getObject1(), pullRequest); })
+                        .collect(Collectors.toList());
+
+                // Suspend every single pullRequest
+                pullRequests.forEach(pullRequestPair -> {
+                    StoreReturnedResult storeReturnedResult = pullRequestPair.getObject1();
+                    PullRequest pullRequest = pullRequestPair.getObject2();
+                    String topic = storeReturnedResult.getRequestHeader().getTopic();
+                    Integer queueId = storeReturnedResult.getRequestHeader().getQueueId();
+                    DefaultPullMessageResultHandler.this.brokerController.getPullRequestHoldService().suspendPullRequest(topic, queueId, pullRequest);
+                });
+
+                globalPullMessageResult.setAsyncResponse(pullFuture);
+                return globalPullMessageResult;
+            }
+            return globalPullMessageResult;
+        }
+
+        // Some of the topic-queues have no data. Return the currently fetched data and ignore requests that could not pull data.
+        if (zeroCopy) {
+            // global zero-copy
+            List<ByteBuffer> headerByteBuffers = pullMessageResultsWithData
+                    .stream()
+                    .map(pair -> response.encodeHeader(pair.getObject1().getGetMessageResult().getBufferTotalSize()))
+                    .collect(Collectors.toList());
+            List<GetMessageResult> getMessageResults = pullMessageResultsWithData
+                    .stream()
+                    .map(pair -> pair.getObject1().getGetMessageResult())
+                    .collect(Collectors.toList());
+            BatchManyMessageTransfer batchManyMessageTransfer = new BatchManyMessageTransfer(headerByteBuffers, getMessageResults);
+            // this call contains all the sub-request's callbacks to make sure all the reference-counted will be released.
+            Runnable callback = () -> {
+                // the callback to release ref-count objects.
+                pullMessageResultsWithData
+                        .stream()
+                        .map(pair -> pair.getObject2().getSyncResponse().getCallback())
+                        .collect(Collectors.toList())
+                        .forEach(Runnable::run);
+            };
+            response.setAttachment(batchManyMessageTransfer);
+            response.setCallback(callback);
+            globalPullMessageResult.setSyncResponse(response);
+            return globalPullMessageResult;
+        }
+
+        List<RemotingCommand> childResponses = null;
+        RemotingCommand batchResponse = RemotingCommand.mergeChildResponses(childResponses);
+
+        globalPullMessageResult.setSyncResponse(batchResponse);
+        return globalPullMessageResult;
+    }
+
+    @Override
+    public PullMessageResult handle(StoreReturnedResult storeReturnedResult) {
+        final GetMessageResult getMessageResult = storeReturnedResult.getGetMessageResult();
+        final RemotingCommand request = storeReturnedResult.getRequest();
+        final PullMessageRequestHeader requestHeader = storeReturnedResult.getRequestHeader();
+        final SocketAddress clientHost = storeReturnedResult.getClientHost();
+        final SubscriptionGroupConfig subscriptionGroupConfig = storeReturnedResult.getSubscriptionGroupConfig();
+        final boolean brokerAllowSuspend = storeReturnedResult.isBrokerAllowSuspend();
+        final MessageFilter messageFilter = storeReturnedResult.getMessageFilter();
+        final RemotingCommand response = storeReturnedResult.getResponse();
+        final boolean transferMsgByHeap = storeReturnedResult.isTransferMsgByHeap();
 
         final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
 
@@ -83,7 +183,7 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
 
                 this.brokerController.getBrokerStatsManager().incBrokerGetNums(getMessageResult.getMessageCount());
 
-                if (this.brokerController.getBrokerConfig().isTransferMsgByHeap()) {
+                if (transferMsgByHeap) {
 
                     final long beginTimeMills = this.brokerController.getMessageStore().now();
                     final byte[] r = this.readGetMessageResult(getMessageResult, requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueId());
@@ -117,7 +217,7 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
                     int queueId = requestHeader.getQueueId();
                     CompletableFuture<RemotingCommand> pullFuture = new CompletableFuture<>();
                     PullRequest pullRequest = new PullRequest(request, clientHost, pollingTimeMills,
-                            this.brokerController.getMessageStore().now(), offset, subscriptionData, messageFilter, pullFuture);
+                            this.brokerController.getMessageStore().now(), offset, messageFilter, pullFuture);
                     this.brokerController.getPullRequestHoldService().suspendPullRequest(topic, queueId, pullRequest);
 
                     pullMessageResult.setAsyncResponse(pullFuture);

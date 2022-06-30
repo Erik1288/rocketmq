@@ -28,9 +28,11 @@ import java.lang.annotation.Annotation;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -588,5 +590,46 @@ public class RemotingCommand {
 
     public void setSerializeTypeCurrentRPC(SerializeType serializeTypeCurrentRPC) {
         this.serializeTypeCurrentRPC = serializeTypeCurrentRPC;
+    }
+
+    public static List<RemotingCommand> parseChildRequests(RemotingCommand batchRequest) throws RemotingCommandException {
+        List<RemotingCommand> childRequests = new ArrayList<>();
+        ByteBuffer childrenBuffer = ByteBuffer.wrap(batchRequest.body);
+
+        int progress = 0;
+        while (childrenBuffer.hasRemaining()) {
+            // remove packet size [4 bytes]
+            int childPacketSize = childrenBuffer.getInt();
+            // don't change the position of childrenBuffer while calling decode.
+            RemotingCommand childRequest = RemotingCommand.decode(childrenBuffer.slice());
+            childRequests.add(childRequest);
+
+            progress += (childPacketSize - 4);
+            childrenBuffer.position(progress);
+        }
+        return childRequests;
+    }
+
+    public static RemotingCommand mergeChildResponses(List<RemotingCommand> childResponses) {
+        RemotingCommand batchResponse = new RemotingCommand();
+        List<ByteBuffer> batchResponseBuffers = new ArrayList<>(childResponses.size());
+
+        int responsesSize = 0;
+        for (RemotingCommand childResponse : childResponses) {
+            ByteBuffer childHeader = childResponse.encodeHeader();
+            batchResponseBuffers.add(childHeader);
+            if (childResponse.getBody() != null) {
+                batchResponseBuffers.add(ByteBuffer.wrap(childResponse.getBody()));
+            }
+            responsesSize += childHeader.getInt();
+        }
+
+        ByteBuffer total = ByteBuffer.allocate(responsesSize);
+        for (ByteBuffer part : batchResponseBuffers) {
+            total.put(part);
+        }
+
+        batchResponse.setBody(total.array());
+        return batchResponse;
     }
 }
