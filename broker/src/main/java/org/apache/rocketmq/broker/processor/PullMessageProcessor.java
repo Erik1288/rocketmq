@@ -366,79 +366,6 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
         return handleStoreResult(storeReturnedResult);
     }
 
-    /**
-     * Batch version.
-     */
-    public CompletableFuture<RemotingCommand> asyncBatchPullMessages(RemotingCommand request, SocketAddress clientHost, boolean brokerAllowSuspend) throws RemotingCommandException {
-        List<RemotingCommand> childRequests = RemotingCommand.parseChildRequests(request);
-
-        RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
-        final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
-
-        List<Result<StoreReturnedResult>> storeReturnedResults = new ArrayList<>(childRequests.size());
-        for (RemotingCommand childRequest : childRequests) {
-            // TODO need parallel? like childRequests.stream().parallel()
-            Result<StoreReturnedResult> storeReturnedResult = getMessageForSingleTopicQueue(childRequest, clientHost, brokerAllowSuspend);
-            storeReturnedResults.add(storeReturnedResult);
-        }
-
-        boolean hasAnyError = storeReturnedResults.stream().anyMatch(Result::hasError);
-        if (hasAnyError) {
-            response.setCode(ResponseCode.SYSTEM_ERROR);
-            response.setRemark("pulling messages in batch has error.");
-            return CompletableFuture.completedFuture(response);
-        }
-
-        List<StoreReturnedResult> storeReturnedResultList = storeReturnedResults
-                .stream()
-                .map(Result::getSuccess)
-                .collect(Collectors.toList());
-
-        return handleStoreResult(storeReturnedResultList, response);
-    }
-
-    private Result<StoreReturnedResult> getMessageForSingleTopicQueue(RemotingCommand request, SocketAddress clientHost, boolean brokerAllowSuspend) throws RemotingCommandException {
-        RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
-        final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
-
-        final PullMessageRequestHeader requestHeader = request.decodeCommandCustomHeader(PullMessageRequestHeader.class);
-
-        final boolean hasCommitOffsetFlag = PullSysFlag.hasCommitOffsetFlag(requestHeader.getSysFlag());
-        final boolean hasSubscriptionFlag = PullSysFlag.hasSubscriptionFlag(requestHeader.getSysFlag());
-        final SubscriptionGroupConfig subscriptionGroupConfig =
-                this.brokerController.getSubscriptionGroupManager().findSubscriptionGroupConfig(requestHeader.getConsumerGroup());
-
-        Result<TopicConfig> topicConfigResult = this.getTopicConfig(requestHeader.getTopic(), response, clientHost);
-        if (topicConfigResult.hasError()) {
-            return Result.error(topicConfigResult.getError());
-        }
-
-        final TopicConfig topicConfig = topicConfigResult.getSuccess();
-
-        Result<Void> permissionResult = this.permissionChecking(topicConfig.getPerm(), request, response, responseHeader, subscriptionGroupConfig, requestHeader);
-        if (permissionResult.hasError()) {
-            return Result.error(permissionResult.getError());
-        }
-
-        Result<MessageFilter> filterResult = getMessageFilter(response, responseHeader, requestHeader, clientHost, subscriptionGroupConfig, hasSubscriptionFlag, topicConfig);
-        if (filterResult.hasError()) {
-            return Result.error(filterResult.getError());
-        }
-
-        final GetMessageResult getMessageResult = getMessageFromStore(requestHeader, clientHost, response, responseHeader, subscriptionGroupConfig, topicConfig, filterResult.getSuccess());
-
-        Result<Void> hookExecutionResult = consumeMessageBefore(request, brokerAllowSuspend, response, requestHeader, getMessageResult);
-        if (hookExecutionResult.hasError()) {
-            return Result.error(hookExecutionResult.getError());
-        }
-
-        boolean transferMsgByHeap = this.brokerController.getBrokerConfig().isTransferMsgByHeap();
-        StoreReturnedResult storeReturnedResult = new StoreReturnedResult(getMessageResult, request, requestHeader, clientHost,
-                subscriptionGroupConfig, brokerAllowSuspend, hasCommitOffsetFlag, filterResult.getSuccess(), response, transferMsgByHeap);
-
-        return Result.success(storeReturnedResult);
-    }
-
     private Result<TopicConfig> getTopicConfig(String topic, RemotingCommand response, SocketAddress clientHost) {
         final TopicConfig topicConfig = this.brokerController.getTopicConfigManager().selectTopicConfig(topic);
         if (null == topicConfig) {
@@ -474,12 +401,9 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
             // the future must be done since suspend is not allowed in sync pull mode.
             assert future.isDone();
             return future.get();
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        } catch (ExecutionException e) {
-            e.printStackTrace();
+        } catch (Exception e) {
+            throw new RemotingCommandException(e.getMessage());
         }
-        return null;
     }
 
     private boolean channelIsWritable(Channel channel, PullMessageRequestHeader requestHeader) {
@@ -826,25 +750,6 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
 
     private CompletableFuture<RemotingCommand> handleStoreResult(StoreReturnedResult storeReturnedResult) {
         PullMessageResult pullMessageResult = this.pullMessageResultHandler.handle(storeReturnedResult);
-
-        commitOffsetIfNecessary(
-                storeReturnedResult.getClientHost(),
-                storeReturnedResult.isBrokerAllowSuspend(),
-                storeReturnedResult.getRequestHeader(),
-                storeReturnedResult.isHasCommitOffsetFlag());
-
-        if (pullMessageResult.isAsyncResponse()) {
-            // async result. i.e. Long-polling
-            return pullMessageResult.getAsyncResponse();
-        } else {
-            // sync result.
-            return CompletableFuture.completedFuture(storeReturnedResult.getResponse());
-        }
-    }
-
-    private CompletableFuture<RemotingCommand> handleStoreResult(List<StoreReturnedResult> storeReturnedResultList, RemotingCommand response) {
-        PullMessageResult pullMessageResult = this.pullMessageResultHandler.handle(storeReturnedResultList, response);
-        StoreReturnedResult storeReturnedResult = storeReturnedResultList.get(0);
 
         commitOffsetIfNecessary(
                 storeReturnedResult.getClientHost(),

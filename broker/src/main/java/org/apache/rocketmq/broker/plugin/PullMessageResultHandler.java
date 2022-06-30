@@ -19,9 +19,6 @@ package org.apache.rocketmq.broker.plugin;
 
 import org.apache.rocketmq.broker.processor.PullMessageResult;
 import org.apache.rocketmq.broker.processor.StoreReturnedResult;
-import org.apache.rocketmq.remoting.protocol.RemotingCommand;
-
-import java.util.List;
 
 public interface PullMessageResultHandler {
 
@@ -32,13 +29,4 @@ public interface PullMessageResultHandler {
      * @return new pull message result
      */
     PullMessageResult handle(StoreReturnedResult storeReturnedResult);
-
-    /**
-     * Handle result of get message from store.
-     *
-     * @param storeReturnedResults
-     * @param response
-     * @return new pull message result
-     */
-    PullMessageResult handle(List<StoreReturnedResult> storeReturnedResults, RemotingCommand response);
 }

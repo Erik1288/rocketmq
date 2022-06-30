@@ -75,7 +75,6 @@ import org.apache.rocketmq.broker.processor.AckMessageProcessor;
 import org.apache.rocketmq.broker.processor.AdminBrokerProcessor;
 import org.apache.rocketmq.broker.processor.ChangeInvisibleTimeProcessor;
 import org.apache.rocketmq.broker.processor.ClientManageProcessor;
-import org.apache.rocketmq.broker.processor.CommonBatchProcessor;
 import org.apache.rocketmq.broker.processor.ConsumerManageProcessor;
 import org.apache.rocketmq.broker.processor.EndTransactionProcessor;
 import org.apache.rocketmq.broker.processor.NotificationProcessor;
@@ -1018,9 +1017,6 @@ public class BrokerController {
          */
         this.remotingServer.registerProcessor(RequestCode.END_TRANSACTION, new EndTransactionProcessor(this), this.endTransactionExecutor);
         this.fastRemotingServer.registerProcessor(RequestCode.END_TRANSACTION, new EndTransactionProcessor(this), this.endTransactionExecutor);
-
-        CommonBatchProcessor commonBatchProcessor = new CommonBatchProcessor(sendMessageProcessor, pullMessageProcessor, consumerManageProcessor);
-        this.remotingServer.registerProcessor(RequestCode.COMMON_BATCH_REQUEST, commonBatchProcessor, this.commonBatchExecutor);
 
         /*
          * Default
