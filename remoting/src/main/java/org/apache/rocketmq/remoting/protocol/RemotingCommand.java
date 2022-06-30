@@ -613,7 +613,7 @@ public class RemotingCommand {
 
         int progress = 0;
         while (childrenBuffer.hasRemaining()) {
-            // strip 4 bytes, just like NettyDecoder does while decoding buffer.
+            // strip 4 bytes, just like how NettyDecoder does while decoding buffer.
             int childPacketSize = childrenBuffer.getInt();
             RemotingCommand child = RemotingCommand.decode(childrenBuffer, childPacketSize);
             children.add(child);
@@ -637,7 +637,6 @@ public class RemotingCommand {
         for (RemotingCommand child : children) {
             ByteBuffer childHeader = child.encodeHeader();
             int childContentSize = childHeader.getInt();
-            childHeader.position(0);
             batchBuffers.add(childHeader);
             if (child.getBody() != null) {
                 batchBuffers.add(ByteBuffer.wrap(child.getBody()));
@@ -647,6 +646,7 @@ public class RemotingCommand {
 
         ByteBuffer total = ByteBuffer.allocate(batchTotalSize);
         for (ByteBuffer part : batchBuffers) {
+            part.position(0);
             total.put(part);
         }
 
