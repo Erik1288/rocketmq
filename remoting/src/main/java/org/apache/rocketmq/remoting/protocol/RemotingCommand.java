@@ -171,8 +171,18 @@ public class RemotingCommand {
         return decode(byteBuffer);
     }
 
+    /**
+     * This method will take in a buffer with 4 bytes stripped.
+     */
     public static RemotingCommand decode(final ByteBuffer byteBuffer) throws RemotingCommandException {
         int length = byteBuffer.limit();
+        return decode(byteBuffer, length);
+    }
+
+    /**
+     * This method will take in a buffer with 4 bytes stripped.
+     */
+    public static RemotingCommand decode(final ByteBuffer byteBuffer, int length) throws RemotingCommandException {
         int oriHeaderLen = byteBuffer.getInt();
         int headerLength = getHeaderLength(oriHeaderLen);
 
@@ -592,44 +602,55 @@ public class RemotingCommand {
         this.serializeTypeCurrentRPC = serializeTypeCurrentRPC;
     }
 
-    public static List<RemotingCommand> parseChildRequests(RemotingCommand batchRequest) throws RemotingCommandException {
-        List<RemotingCommand> childRequests = new ArrayList<>();
-        ByteBuffer childrenBuffer = ByteBuffer.wrap(batchRequest.body);
+    /**
+     * Parse a batch request or response into list.
+     * @param batch batch request or response
+     * @return batch
+     */
+    public static List<RemotingCommand> parseChildren(RemotingCommand batch) throws RemotingCommandException {
+        List<RemotingCommand> children = new ArrayList<>();
+        ByteBuffer childrenBuffer = ByteBuffer.wrap(batch.body);
 
         int progress = 0;
         while (childrenBuffer.hasRemaining()) {
-            // remove packet size [4 bytes]
+            // strip 4 bytes, just like NettyDecoder does while decoding buffer.
             int childPacketSize = childrenBuffer.getInt();
-            // don't change the position of childrenBuffer while calling decode.
-            RemotingCommand childRequest = RemotingCommand.decode(childrenBuffer.slice());
-            childRequests.add(childRequest);
+            RemotingCommand child = RemotingCommand.decode(childrenBuffer, childPacketSize);
+            children.add(child);
 
-            progress += (childPacketSize - 4);
+            progress += (childPacketSize + 4);
             childrenBuffer.position(progress);
         }
-        return childRequests;
+        return children;
     }
 
-    public static RemotingCommand mergeChildResponses(List<RemotingCommand> childResponses) {
-        RemotingCommand batchResponse = new RemotingCommand();
-        List<ByteBuffer> batchResponseBuffers = new ArrayList<>(childResponses.size());
+    /**
+     * Merge requests or responses into one batch.
+     * @param children requests or responses
+     * @return batch
+     */
+    public static RemotingCommand mergeChildren(List<RemotingCommand> children) {
+        RemotingCommand batch = new RemotingCommand();
+        List<ByteBuffer> batchBuffers = new ArrayList<>(children.size());
 
-        int responsesSize = 0;
-        for (RemotingCommand childResponse : childResponses) {
-            ByteBuffer childHeader = childResponse.encodeHeader();
-            batchResponseBuffers.add(childHeader);
-            if (childResponse.getBody() != null) {
-                batchResponseBuffers.add(ByteBuffer.wrap(childResponse.getBody()));
+        int batchTotalSize = 0;
+        for (RemotingCommand child : children) {
+            ByteBuffer childHeader = child.encodeHeader();
+            int childContentSize = childHeader.getInt();
+            childHeader.position(0);
+            batchBuffers.add(childHeader);
+            if (child.getBody() != null) {
+                batchBuffers.add(ByteBuffer.wrap(child.getBody()));
             }
-            responsesSize += childHeader.getInt();
+            batchTotalSize += (childContentSize + 4);
         }
 
-        ByteBuffer total = ByteBuffer.allocate(responsesSize);
-        for (ByteBuffer part : batchResponseBuffers) {
+        ByteBuffer total = ByteBuffer.allocate(batchTotalSize);
+        for (ByteBuffer part : batchBuffers) {
             total.put(part);
         }
 
-        batchResponse.setBody(total.array());
-        return batchResponse;
+        batch.setBody(total.array());
+        return batch;
     }
 }

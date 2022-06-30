@@ -19,11 +19,11 @@ package org.apache.rocketmq.remoting.protocol;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
-import com.alibaba.fastjson.JSON;
-import java.util.HashSet;
 import org.apache.rocketmq.remoting.CommandCustomHeader;
 import org.apache.rocketmq.remoting.annotation.CFNotNull;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
@@ -250,6 +250,24 @@ public class RemotingCommandTest {
         remotingCommand.makeCustomHeaderToNet();
         SubExtFieldsHeader other = (SubExtFieldsHeader) remotingCommand.decodeCommandCustomHeader(subExtFieldsHeader.getClass());
         Assert.assertEquals(other, subExtFieldsHeader);
+    }
+
+    @Test
+    public void testParseAndMergeChildren() throws Exception {
+        List<RemotingCommand> children = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            CommandCustomHeader header = new SampleCommandCustomHeader();
+            int code = 103; //org.apache.rocketmq.common.protocol.RequestCode.REGISTER_BROKER
+            RemotingCommand child = RemotingCommand.createRequestCommand(code, header);
+            child.setBody(new byte[] {(byte) i});
+            children.add(child);
+        }
+        RemotingCommand batch = RemotingCommand.mergeChildren(children);
+
+        List<RemotingCommand> parsedChildren = RemotingCommand.parseChildren(batch);
+        for (RemotingCommand parsedChild : parsedChildren) {
+            assertThat(parsedChild).isNotNull();
+        }
     }
 }
 

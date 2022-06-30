@@ -62,7 +62,7 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
 
     @Override
     public PullMessageResult handle(List<StoreReturnedResult> storeReturnedResults, RemotingCommand response) {
-        PullMessageResult globalPullMessageResult = new PullMessageResult();
+        PullMessageResult batchPullMessageResult = new PullMessageResult();
 
         List<Pair<StoreReturnedResult, PullMessageResult>> pullMessageResults = storeReturnedResults
                 .stream()
@@ -75,52 +75,50 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
                 .collect(Collectors.toList());
 
         StoreReturnedResult sample = storeReturnedResults.get(0);
-        boolean allHaveInsufficientData = pullMessageResultsWithData.size() == 0;
+        boolean allHaveInsufficientData = pullMessageResultsWithData.isEmpty();
         boolean zeroCopy = !sample.isTransferMsgByHeap();
         boolean brokerAllowSuspend = sample.isBrokerAllowSuspend();
 
-        if (allHaveInsufficientData) {
-            // global long-polling
-            final boolean hasSuspendFlag = PullSysFlag.hasSuspendFlag(sample.getRequestHeader().getSysFlag());
+        // batchResponse long-polling
+        final boolean hasSuspendFlag = PullSysFlag.hasSuspendFlag(sample.getRequestHeader().getSysFlag());
+
+        if (allHaveInsufficientData && brokerAllowSuspend && hasSuspendFlag) {
             final long suspendTimeoutMillisLong = hasSuspendFlag ? sample.getRequestHeader().getSuspendTimeoutMillis() : 0;
 
-            if (brokerAllowSuspend && hasSuspendFlag) {
-                long pollingTimeMills = suspendTimeoutMillisLong;
-                if (!this.brokerController.getBrokerConfig().isLongPollingEnable()) {
-                    pollingTimeMills = this.brokerController.getBrokerConfig().getShortPollingTimeMills();
-                }
-                // the shared pull future.
-                CompletableFuture<RemotingCommand> pullFuture = new CompletableFuture<>();
-
-                final long finalPollingTimeMills = pollingTimeMills;
-                List<Pair<StoreReturnedResult, PullRequest>> pullRequests = pullMessageResults
-                        .stream()
-                        .map(pair -> {
-                            PullRequest pullRequest = new PullRequest(
-                                    pair.getObject1().getRequest(),
-                                    pair.getObject1().getClientHost(),
-                                    finalPollingTimeMills,
-                                    DefaultPullMessageResultHandler.this.brokerController.getMessageStore().now(),
-                                    pair.getObject1().getRequestHeader().getQueueOffset(),
-                                    pair.getObject1().getMessageFilter(),
-                                    pullFuture
-                            );
-                            return new Pair<>(pair.getObject1(), pullRequest); })
-                        .collect(Collectors.toList());
-
-                // Suspend every single pullRequest
-                pullRequests.forEach(pullRequestPair -> {
-                    StoreReturnedResult storeReturnedResult = pullRequestPair.getObject1();
-                    PullRequest pullRequest = pullRequestPair.getObject2();
-                    String topic = storeReturnedResult.getRequestHeader().getTopic();
-                    Integer queueId = storeReturnedResult.getRequestHeader().getQueueId();
-                    DefaultPullMessageResultHandler.this.brokerController.getPullRequestHoldService().suspendPullRequest(topic, queueId, pullRequest);
-                });
-
-                globalPullMessageResult.setAsyncResponse(pullFuture);
-                return globalPullMessageResult;
+            long pollingTimeMills = suspendTimeoutMillisLong;
+            if (!this.brokerController.getBrokerConfig().isLongPollingEnable()) {
+                pollingTimeMills = this.brokerController.getBrokerConfig().getShortPollingTimeMills();
             }
-            return globalPullMessageResult;
+            // this future should be shared by all pullRequests in one batchRequest.
+            CompletableFuture<RemotingCommand> pullFuture = new CompletableFuture<>();
+
+            final long finalPollingTimeMills = pollingTimeMills;
+            List<Pair<StoreReturnedResult, PullRequest>> pullRequests = pullMessageResults
+                    .stream()
+                    .map(pair -> {
+                        PullRequest pullRequest = new PullRequest(
+                                pair.getObject1().getRequest(),
+                                pair.getObject1().getClientHost(),
+                                finalPollingTimeMills,
+                                DefaultPullMessageResultHandler.this.brokerController.getMessageStore().now(),
+                                pair.getObject1().getRequestHeader().getQueueOffset(),
+                                pair.getObject1().getMessageFilter(),
+                                pullFuture
+                        );
+                        return new Pair<>(pair.getObject1(), pullRequest); })
+                    .collect(Collectors.toList());
+
+            // Suspend every single pullRequest
+            pullRequests.forEach(pullRequestPair -> {
+                StoreReturnedResult storeReturnedResult = pullRequestPair.getObject1();
+                PullRequest pullRequest = pullRequestPair.getObject2();
+                String topic = storeReturnedResult.getRequestHeader().getTopic();
+                Integer queueId = storeReturnedResult.getRequestHeader().getQueueId();
+                DefaultPullMessageResultHandler.this.brokerController.getPullRequestHoldService().suspendPullRequest(topic, queueId, pullRequest);
+            });
+
+            batchPullMessageResult.setAsyncResponse(pullFuture);
+            return batchPullMessageResult;
         }
 
         // Some of the topic-queues have no data. Return the currently fetched data and ignore requests that could not pull data.
@@ -146,15 +144,18 @@ public class DefaultPullMessageResultHandler implements PullMessageResultHandler
             };
             response.setAttachment(batchManyMessageTransfer);
             response.setCallback(callback);
-            globalPullMessageResult.setSyncResponse(response);
-            return globalPullMessageResult;
+            batchPullMessageResult.setSyncResponse(response);
+            return batchPullMessageResult;
         }
 
-        List<RemotingCommand> childResponses = null;
-        RemotingCommand batchResponse = RemotingCommand.mergeChildResponses(childResponses);
+        List<RemotingCommand> childResponses = pullMessageResultsWithData
+                .stream()
+                .map(pair -> pair.getObject1().getResponse())
+                .collect(Collectors.toList());
+        RemotingCommand batchResponse = RemotingCommand.mergeChildren(childResponses);
 
-        globalPullMessageResult.setSyncResponse(batchResponse);
-        return globalPullMessageResult;
+        batchPullMessageResult.setSyncResponse(batchResponse);
+        return batchPullMessageResult;
     }
 
     @Override

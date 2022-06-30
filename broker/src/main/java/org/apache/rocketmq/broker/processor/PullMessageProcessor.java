@@ -17,7 +17,6 @@
 package org.apache.rocketmq.broker.processor;
 
 import java.net.SocketAddress;
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -370,7 +369,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
      * Batch version.
      */
     public CompletableFuture<RemotingCommand> asyncBatchPullMessages(RemotingCommand request, SocketAddress clientHost, boolean brokerAllowSuspend) throws RemotingCommandException {
-        List<RemotingCommand> childRequests = RemotingCommand.parseChildRequests(request);
+        List<RemotingCommand> childRequests = RemotingCommand.parseChildren(request);
 
         RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
         final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
