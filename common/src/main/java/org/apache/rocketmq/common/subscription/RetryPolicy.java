@@ -15,24 +15,14 @@
  * limitations under the License.
  */
 
-package org.apache.rocketmq.apis.message;
+package org.apache.rocketmq.common.subscription;
 
-/**
- * Abstract message id, the implement must override {@link Object#toString()}, which indicates the message id using
- * string form.
- */
-public interface MessageId {
+public interface RetryPolicy {
     /**
-     * Get the version of message id.
+     * Compute message's next delay duration by specify reconsumeTimes
      *
-     * @return the version of message id.
+     * @param reconsumeTimes Message reconsumeTimes
+     * @return Message's nextDelayDuration in milliseconds
      */
-    MessageIdVersion getVersion();
-
-    /**
-     * The implementation <strong>must</strong> override this method, which indicates the message id using string form.
-     *
-     * @return string-formed string id.
-     */
-    String toString();
+    long nextDelayDuration(int reconsumeTimes);
 }
