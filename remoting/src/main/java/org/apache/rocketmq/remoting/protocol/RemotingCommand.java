@@ -615,6 +615,7 @@ public class RemotingCommand {
         while (childrenBuffer.hasRemaining()) {
             // strip 4 bytes, just like how NettyDecoder does while decoding buffer.
             int childPacketSize = childrenBuffer.getInt();
+            // need protection
             RemotingCommand child = RemotingCommand.decode(childrenBuffer, childPacketSize);
             children.add(child);
 
@@ -644,6 +645,7 @@ public class RemotingCommand {
             batchTotalSize += (childContentSize + 4);
         }
 
+        // need protection
         ByteBuffer total = ByteBuffer.allocate(batchTotalSize);
         for (ByteBuffer part : batchBuffers) {
             part.position(0);
