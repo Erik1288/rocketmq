@@ -111,4 +111,12 @@ public class ManyMessageTransfer extends AbstractReferenceCounted implements Fil
     protected void deallocate() {
         this.getMessageResult.release();
     }
+
+    public ByteBuffer getByteBufferHeader() {
+        return byteBufferHeader;
+    }
+
+    public GetMessageResult getGetMessageResult() {
+        return getMessageResult;
+    }
 }

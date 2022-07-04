@@ -66,6 +66,7 @@ import org.apache.rocketmq.remoting.common.RemotingHelper;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 import org.apache.rocketmq.remoting.netty.AsyncNettyRequestProcessor;
 import org.apache.rocketmq.remoting.netty.NettyRequestProcessor;
+import org.apache.rocketmq.remoting.netty.RequestTask;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 import org.apache.rocketmq.store.GetMessageResult;
 import org.apache.rocketmq.store.GetMessageStatus;
@@ -75,7 +76,7 @@ import org.apache.rocketmq.store.stats.BrokerStatsManager;
 
 import static org.apache.rocketmq.remoting.protocol.RemotingCommand.buildErrorResponse;
 
-public class PullMessageProcessor extends AsyncNettyRequestProcessor implements NettyRequestProcessor {
+public class PullMessageProcessor extends CommonBatchProcessor implements NettyRequestProcessor {
     private static final InternalLogger LOGGER = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
     private List<ConsumeMessageHook> consumeMessageHookList;
     private PullMessageResultHandler pullMessageResultHandler;
@@ -298,7 +299,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
             return CompletableFuture.completedFuture(null);
         } else {
             SocketAddress clientHost = ctx.channel().remoteAddress();
-            return asyncPullMessages(request, clientHost, true);
+            return asyncPullMessages(request, clientHost, true, fastFailRunnable);
         }
     }
 
@@ -901,9 +902,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor implements 
                 LOGGER.error("excuteRequestWhenWakeup run", e1);
             }
         };
-        // TODO what's the difference?
-        // this.brokerController.getPullMessageExecutor().submit(new RequestTask(run, channel, request));
-        this.brokerController.getPullMessageExecutor().submit(run);
+        this.brokerController.getLongPollingPullMessageExecutor().submit(new RequestTask(run, channel, request));
     }
 
     public void registerConsumeMessageHook(List<ConsumeMessageHook> consumeMessageHookList) {

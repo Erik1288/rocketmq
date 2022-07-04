@@ -89,8 +89,9 @@ public class RemotingCommand {
     private transient byte[] body;
 
     // for async response
-    private Object attachment;
-    private Runnable callback;
+    private transient Object attachment;
+    private transient Runnable callback;
+    private transient Runnable finallyCallback;
 
     protected RemotingCommand() {
     }
@@ -622,6 +623,8 @@ public class RemotingCommand {
             progress += (childPacketSize + 4);
             childrenBuffer.position(progress);
         }
+
+        assert children.size() > 0;
         return children;
     }
 
