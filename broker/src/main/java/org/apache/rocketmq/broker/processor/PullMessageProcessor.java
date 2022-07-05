@@ -897,7 +897,13 @@ public class PullMessageProcessor extends CommonBatchProcessor implements NettyR
                     response.markResponseType();
                 }
 
-                pullRequest.getFuture().complete(response);
+                boolean triggered = pullRequest.getFuture().complete(response);
+                // The future has been triggered in other thread.
+                if (!triggered) {
+                    if (response != null) {
+                        response.getCallback().run();
+                    }
+                }
             } catch (RemotingCommandException e1) {
                 LOGGER.error("excuteRequestWhenWakeup run", e1);
             }

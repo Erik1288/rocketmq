@@ -6,7 +6,9 @@ import org.apache.rocketmq.remoting.netty.AsyncNettyRequestProcessor;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
@@ -23,28 +25,24 @@ public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
 
     @Override
     public CompletableFuture<RemotingCommand> asyncProcessRequest(ChannelHandlerContext ctx, RemotingCommand request) throws RemotingCommandException {
-        CommonBatchProcessor commonBatchProcessor = dispatchToProcessor();
+        CommonBatchProcessor commonBatchProcessor = dispatchToProcessor(request);
         List<RemotingCommand> requestChildren = RemotingCommand.parseChildren(request);
 
-        List<CompletableFuture<RemotingCommand>> doneResults = new ArrayList<>();
-        List<CompletableFuture<RemotingCommand>> undoneResults = new ArrayList<>();
+        Map<Integer /* opaque */, CompletableFuture<RemotingCommand>> doneResults = new HashMap<>();
+        Map<Integer /* opaque */, CompletableFuture<RemotingCommand>> undoneResults = new HashMap<>();
 
         for (RemotingCommand childRequest : requestChildren) {
             CompletableFuture<RemotingCommand> childFuture = commonBatchProcessor.asyncProcessRequest(ctx, childRequest);
             if (childFuture.isDone()) {
-                doneResults.add(childFuture);
+                doneResults.put(childRequest.getOpaque(), childFuture);
             } else {
-                undoneResults.add(childFuture);
+                undoneResults.put(childRequest.getOpaque(), childFuture);
             }
-        }
-
-        if (doneResults.size() + undoneResults.size() != requestChildren.size()) {
-
         }
 
         MergeBatchResponseStrategy strategy = selectStrategy(this);
 
-        return strategy.merge(doneResults, undoneResults);
+        return strategy.merge(request, doneResults, undoneResults);
     }
 
     private MergeBatchResponseStrategy selectStrategy(CommonBatchProcessor commonBatchProcessor) {
@@ -59,7 +57,8 @@ public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
         }
     }
 
-    private CommonBatchProcessor dispatchToProcessor() {
-        return new CommonBatchProcessor();
+    private CommonBatchProcessor dispatchToProcessor(RemotingCommand request) {
+
+        return new PullMessageProcessor();
     }
 }
