@@ -21,6 +21,7 @@ import java.io.File;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import org.apache.rocketmq.broker.latency.FutureTaskExt;
 import org.apache.rocketmq.common.BrokerConfig;
@@ -28,9 +29,9 @@ import org.apache.rocketmq.common.UtilAll;
 import org.apache.rocketmq.remoting.netty.NettyClientConfig;
 import org.apache.rocketmq.remoting.netty.NettyServerConfig;
 import org.apache.rocketmq.remoting.netty.RequestTask;
+import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 import org.apache.rocketmq.store.config.MessageStoreConfig;
 import org.junit.After;
-import org.junit.Ignore;
 import org.junit.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;

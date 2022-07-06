@@ -124,6 +124,7 @@ public class BrokerConfig {
     private boolean brokerFastFailureEnable = true;
     private long waitTimeMillsInSendQueue = 200;
     private long waitTimeMillsInPullQueue = 5 * 1000;
+    private long waitTimeMillsInLongPollingQueue = 5 * 1000;
     private long waitTimeMillsInHeartbeatQueue = 31 * 1000;
     private long waitTimeMillsInTransactionQueue = 3 * 1000;
 
@@ -252,6 +253,14 @@ public class BrokerConfig {
 
     public void setWaitTimeMillsInPullQueue(final long waitTimeMillsInPullQueue) {
         this.waitTimeMillsInPullQueue = waitTimeMillsInPullQueue;
+    }
+
+    public long getWaitTimeMillsInLongPollingQueue() {
+        return waitTimeMillsInLongPollingQueue;
+    }
+
+    public void setWaitTimeMillsInLongPollingQueue(long waitTimeMillsInLongPollingQueue) {
+        this.waitTimeMillsInLongPollingQueue = waitTimeMillsInLongPollingQueue;
     }
 
     public boolean isDisableConsumeIfConsumerReadSlowly() {

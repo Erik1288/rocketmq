@@ -14,19 +14,28 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.rocketmq.remoting;
 
-package org.apache.rocketmq.remoting.netty;
-
-import io.netty.channel.ChannelHandlerContext;
+import java.util.concurrent.Future;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
-import java.util.concurrent.CompletableFuture;
-
-public abstract class AsyncNettyRequestProcessor implements NettyRequestProcessor {
-
-    public CompletableFuture<RemotingCommand> asyncProcessRequest(ChannelHandlerContext ctx, RemotingCommand request,
-                                                                  RemotingResponseCallback responseCallback) throws Exception {
-        RemotingCommand response = processRequest(ctx, request);
-        return responseCallback.callback(response);
+/**
+ * If the decision is set to STOP, the responseFuture should be set too.
+ */
+public interface RPCHookContext {
+    enum Decision {
+        CONTINUE,
+        STOP,
     }
+
+    Decision getDecision();
+
+    void setDecision(Decision decision);
+
+    void setResponseFuture(Future<RemotingCommand> responseFuture);
+
+    Future<RemotingCommand> getResponseFuture();
+
+    void clear();
+
 }

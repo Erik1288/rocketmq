@@ -24,6 +24,7 @@ import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
@@ -85,6 +86,15 @@ public class RemotingCommand {
     private SerializeType serializeTypeCurrentRPC = serializeTypeConfigInThisServer;
 
     private transient byte[] body;
+
+    // zero-copy
+    private transient Object attachment;
+    // async response future
+    private transient CompletableFuture<RemotingCommand> asyncFuture;
+    // async response common callback
+    private transient Runnable callback;
+    // async response special callback, and it’s USED FOR releasing reference-counted resources ONLY.
+    private transient Runnable finallyCallback;
 
     protected RemotingCommand() {
     }
@@ -567,6 +577,38 @@ public class RemotingCommand {
             extFields = new HashMap<String, String>();
         }
         extFields.put(key, value);
+    }
+
+    public CompletableFuture<RemotingCommand> getAsyncFuture() {
+        return asyncFuture;
+    }
+
+    public void setAsyncFuture(CompletableFuture<RemotingCommand> asyncFuture) {
+        this.asyncFuture = asyncFuture;
+    }
+
+    public Object getAttachment() {
+        return attachment;
+    }
+
+    public void setAttachment(Object attachment) {
+        this.attachment = attachment;
+    }
+
+    public Runnable getCallback() {
+        return callback;
+    }
+
+    public void setCallback(Runnable callback) {
+        this.callback = callback;
+    }
+
+    public Runnable getFinallyCallback() {
+        return finallyCallback;
+    }
+
+    public void setFinallyCallback(Runnable finallyCallback) {
+        this.finallyCallback = finallyCallback;
     }
 
     @Override

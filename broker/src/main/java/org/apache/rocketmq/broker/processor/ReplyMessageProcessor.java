@@ -20,6 +20,7 @@ package org.apache.rocketmq.broker.processor;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import org.apache.rocketmq.broker.BrokerController;
+import org.apache.rocketmq.broker.client.RemoteAddressSupplier;
 import org.apache.rocketmq.broker.mqtrace.SendMessageContext;
 import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.UtilAll;
@@ -58,15 +59,16 @@ public class ReplyMessageProcessor extends AbstractSendMessageProcessor {
     public RemotingCommand processRequest(ChannelHandlerContext ctx,
         RemotingCommand request) throws RemotingCommandException {
         SendMessageContext mqtraceContext = null;
+        final RemoteAddressSupplier remoteAddressSupplier = new RemoteAddressSupplier(ctx.channel());
         SendMessageRequestHeader requestHeader = parseRequestHeader(request);
         if (requestHeader == null) {
             return null;
         }
 
-        mqtraceContext = buildMsgContext(ctx, requestHeader);
-        this.executeSendMessageHookBefore(ctx, request, mqtraceContext);
+        mqtraceContext = buildMsgContext(requestHeader, remoteAddressSupplier);
+        this.executeSendMessageHookBefore(request, mqtraceContext, remoteAddressSupplier);
 
-        RemotingCommand response = this.processReplyMessageRequest(ctx, request, mqtraceContext, requestHeader);
+        RemotingCommand response = this.processReplyMessageRequest(request, mqtraceContext, requestHeader, remoteAddressSupplier);
 
         this.executeSendMessageHookAfter(response, mqtraceContext);
         return response;
@@ -95,10 +97,10 @@ public class ReplyMessageProcessor extends AbstractSendMessageProcessor {
         return requestHeader;
     }
 
-    private RemotingCommand processReplyMessageRequest(final ChannelHandlerContext ctx,
-        final RemotingCommand request,
-        final SendMessageContext sendMessageContext,
-        final SendMessageRequestHeader requestHeader) {
+    private RemotingCommand processReplyMessageRequest(final RemotingCommand request,
+                                                       final SendMessageContext sendMessageContext,
+                                                       final SendMessageRequestHeader requestHeader,
+                                                       RemoteAddressSupplier remoteAddressSupplier) {
         final RemotingCommand response = RemotingCommand.createResponseCommand(SendMessageResponseHeader.class);
         final SendMessageResponseHeader responseHeader = (SendMessageResponseHeader) response.readCustomHeader();
 
@@ -116,7 +118,7 @@ public class ReplyMessageProcessor extends AbstractSendMessageProcessor {
         }
 
         response.setCode(-1);
-        super.msgCheck(ctx, requestHeader, response);
+        super.msgCheck(requestHeader, response, remoteAddressSupplier);
         if (response.getCode() != -1) {
             return response;
         }
@@ -138,11 +140,11 @@ public class ReplyMessageProcessor extends AbstractSendMessageProcessor {
         MessageAccessor.setProperties(msgInner, MessageDecoder.string2messageProperties(requestHeader.getProperties()));
         msgInner.setPropertiesString(requestHeader.getProperties());
         msgInner.setBornTimestamp(requestHeader.getBornTimestamp());
-        msgInner.setBornHost(ctx.channel().remoteAddress());
+        msgInner.setBornHost(remoteAddressSupplier.remoteAddress());
         msgInner.setStoreHost(this.getStoreHost());
         msgInner.setReconsumeTimes(requestHeader.getReconsumeTimes() == null ? 0 : requestHeader.getReconsumeTimes());
 
-        PushReplyResult pushReplyResult = this.pushReplyMessage(ctx, requestHeader, msgInner);
+        PushReplyResult pushReplyResult = this.pushReplyMessage(requestHeader, msgInner, remoteAddressSupplier);
         this.handlePushReplyResult(pushReplyResult, response, responseHeader, queueIdInt);
 
         if (this.brokerController.getBrokerConfig().isStoreReplyMessageEnable()) {
@@ -153,11 +155,12 @@ public class ReplyMessageProcessor extends AbstractSendMessageProcessor {
         return response;
     }
 
-    private PushReplyResult pushReplyMessage(final ChannelHandlerContext ctx,
-        final SendMessageRequestHeader requestHeader,
-        final Message msg) {
+    private PushReplyResult pushReplyMessage(
+            final SendMessageRequestHeader requestHeader,
+            final Message msg,
+            final RemoteAddressSupplier remoteAddressSupplier) {
         ReplyMessageRequestHeader replyMessageRequestHeader = new ReplyMessageRequestHeader();
-        InetSocketAddress bornAddress = (InetSocketAddress)(ctx.channel().remoteAddress());
+        InetSocketAddress bornAddress = (InetSocketAddress)(remoteAddressSupplier.remoteAddress());
         replyMessageRequestHeader.setBornHost(bornAddress.getAddress().getHostAddress() + ":" + bornAddress.getPort());
         InetSocketAddress storeAddress = (InetSocketAddress)(this.getStoreHost());
         replyMessageRequestHeader.setStoreHost(storeAddress.getAddress().getHostAddress() + ":" + storeAddress.getPort());

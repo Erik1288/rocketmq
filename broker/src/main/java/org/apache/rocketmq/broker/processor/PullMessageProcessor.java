@@ -16,15 +16,18 @@
  */
 package org.apache.rocketmq.broker.processor;
 
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.FileRegion;
+
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.function.Consumer;
+
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.client.ConsumerGroupInfo;
+import org.apache.rocketmq.broker.client.RemoteAddressSupplier;
 import org.apache.rocketmq.broker.filter.ConsumerFilterData;
 import org.apache.rocketmq.broker.filter.ConsumerFilterManager;
 import org.apache.rocketmq.broker.filter.ExpressionForRetryMessageFilter;
@@ -55,10 +58,10 @@ import org.apache.rocketmq.common.sysflag.PullSysFlag;
 import org.apache.rocketmq.common.topic.TopicValidator;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
-import org.apache.rocketmq.remoting.common.RemotingHelper;
 import org.apache.rocketmq.remoting.common.RemotingUtil;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 import org.apache.rocketmq.remoting.netty.AsyncNettyRequestProcessor;
+import org.apache.rocketmq.remoting.netty.RemotingResponseCallback;
 import org.apache.rocketmq.remoting.netty.RequestTask;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 import org.apache.rocketmq.store.GetMessageResult;
@@ -78,9 +81,23 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
     }
 
     @Override
+    public CompletableFuture<RemotingCommand> asyncProcessRequest(ChannelHandlerContext ctx, RemotingCommand request, RemotingResponseCallback responseCallback) throws Exception {
+        return asyncProcessRequest(ctx, request).thenComposeAsync(responseCallback::callback, this.brokerController.getPullMessageExecutor());
+    }
+
+    @Override
     public RemotingCommand processRequest(final ChannelHandlerContext ctx,
         RemotingCommand request) throws RemotingCommandException {
-        return this.processRequest(ctx.channel(), request, true);
+        RemoteAddressSupplier remoteAddressSupplier = new RemoteAddressSupplier(ctx.channel());
+        Consumer<RemotingCommand> fastFailCallback = ctx.channel()::writeAndFlush;
+        return syncPullMessage(request, remoteAddressSupplier, fastFailCallback);
+    }
+
+    public CompletableFuture<RemotingCommand> asyncProcessRequest(ChannelHandlerContext ctx,
+                                                                  RemotingCommand request) throws RemotingCommandException {
+        RemoteAddressSupplier remoteAddressSupplier = new RemoteAddressSupplier(ctx.channel());
+        Consumer<RemotingCommand> fastFailRunnable = ctx.channel()::writeAndFlush;
+        return asyncPullMessage(request, true, remoteAddressSupplier, fastFailRunnable);
     }
 
     @Override
@@ -88,10 +105,28 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
         return false;
     }
 
-    private RemotingCommand processRequest(final Channel channel, RemotingCommand request, boolean brokerAllowSuspend)
-        throws RemotingCommandException {
+    public RemotingCommand syncPullMessage(
+            RemotingCommand request,
+            RemoteAddressSupplier remoteAddressSupplier,
+            Consumer<RemotingCommand> fastFailCallback) throws RemotingCommandException {
+        RemotingCommand response = null;
+        try {
+            CompletableFuture<RemotingCommand> future = asyncPullMessage(request, false, remoteAddressSupplier, fastFailCallback);
+            assert future.isDone();
+            response = future.get();
+        } catch (InterruptedException | ExecutionException e) {
+            log.error("process PullMessage error, request : " + request, e);
+        }
+        return response;
+    }
+
+    public CompletableFuture<RemotingCommand> asyncPullMessage(
+            RemotingCommand request,
+            boolean brokerAllowSuspend,
+            RemoteAddressSupplier remoteAddressSupplier,
+            Consumer<RemotingCommand> fastFailCallback) throws RemotingCommandException {
         final long beginTimeMills = this.brokerController.getMessageStore().now();
-        RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
+        final RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
         final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
         final PullMessageRequestHeader requestHeader =
             (PullMessageRequestHeader) request.decodeCommandCustomHeader(PullMessageRequestHeader.class);
@@ -103,7 +138,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
         if (!PermName.isReadable(this.brokerController.getBrokerConfig().getBrokerPermission())) {
             response.setCode(ResponseCode.NO_PERMISSION);
             response.setRemark(String.format("the broker[%s] pulling message is forbidden", this.brokerController.getBrokerConfig().getBrokerIP1()));
-            return response;
+            return CompletableFuture.completedFuture(request);
         }
 
         SubscriptionGroupConfig subscriptionGroupConfig =
@@ -111,13 +146,13 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
         if (null == subscriptionGroupConfig) {
             response.setCode(ResponseCode.SUBSCRIPTION_GROUP_NOT_EXIST);
             response.setRemark(String.format("subscription group [%s] does not exist, %s", requestHeader.getConsumerGroup(), FAQUrl.suggestTodo(FAQUrl.SUBSCRIPTION_GROUP_NOT_EXIST)));
-            return response;
+            return CompletableFuture.completedFuture(request);
         }
 
         if (!subscriptionGroupConfig.isConsumeEnable()) {
             response.setCode(ResponseCode.NO_PERMISSION);
             response.setRemark("subscription group no permission, " + requestHeader.getConsumerGroup());
-            return response;
+            return CompletableFuture.completedFuture(request);
         }
 
         final boolean hasSuspendFlag = PullSysFlag.hasSuspendFlag(requestHeader.getSysFlag());
@@ -128,25 +163,25 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
 
         TopicConfig topicConfig = this.brokerController.getTopicConfigManager().selectTopicConfig(requestHeader.getTopic());
         if (null == topicConfig) {
-            log.error("the topic {} not exist, consumer: {}", requestHeader.getTopic(), RemotingHelper.parseChannelRemoteAddr(channel));
+            log.error("the topic {} not exist, consumer: {}", requestHeader.getTopic(), remoteAddressSupplier.channelRemoteAddr());
             response.setCode(ResponseCode.TOPIC_NOT_EXIST);
             response.setRemark(String.format("topic[%s] not exist, apply first please! %s", requestHeader.getTopic(), FAQUrl.suggestTodo(FAQUrl.APPLY_TOPIC_URL)));
-            return response;
+            return CompletableFuture.completedFuture(request);
         }
 
         if (!PermName.isReadable(topicConfig.getPerm())) {
             response.setCode(ResponseCode.NO_PERMISSION);
             response.setRemark("the topic[" + requestHeader.getTopic() + "] pulling message is forbidden");
-            return response;
+            return CompletableFuture.completedFuture(request);
         }
 
         if (requestHeader.getQueueId() < 0 || requestHeader.getQueueId() >= topicConfig.getReadQueueNums()) {
             String errorInfo = String.format("queueId[%d] is illegal, topic:[%s] topicConfig.readQueueNums:[%d] consumer:[%s]",
-                requestHeader.getQueueId(), requestHeader.getTopic(), topicConfig.getReadQueueNums(), channel.remoteAddress());
+                requestHeader.getQueueId(), requestHeader.getTopic(), topicConfig.getReadQueueNums(), remoteAddressSupplier.remoteAddress());
             log.warn(errorInfo);
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark(errorInfo);
-            return response;
+            return CompletableFuture.completedFuture(request);
         }
 
         SubscriptionData subscriptionData = null;
@@ -168,7 +203,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                     requestHeader.getConsumerGroup());
                 response.setCode(ResponseCode.SUBSCRIPTION_PARSE_FAILED);
                 response.setRemark("parse the consumer's subscription failed");
-                return response;
+                return CompletableFuture.completedFuture(request);
             }
         } else {
             ConsumerGroupInfo consumerGroupInfo =
@@ -177,14 +212,14 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                 log.warn("the consumer's group info not exist, group: {}", requestHeader.getConsumerGroup());
                 response.setCode(ResponseCode.SUBSCRIPTION_NOT_EXIST);
                 response.setRemark("the consumer's group info not exist" + FAQUrl.suggestTodo(FAQUrl.SAME_GROUP_DIFFERENT_TOPIC));
-                return response;
+                return CompletableFuture.completedFuture(request);
             }
 
             if (!subscriptionGroupConfig.isConsumeBroadcastEnable()
                 && consumerGroupInfo.getMessageModel() == MessageModel.BROADCASTING) {
                 response.setCode(ResponseCode.NO_PERMISSION);
                 response.setRemark("the consumer group[" + requestHeader.getConsumerGroup() + "] can not consume by broadcast way");
-                return response;
+                return CompletableFuture.completedFuture(request);
             }
 
             subscriptionData = consumerGroupInfo.findSubscriptionData(requestHeader.getTopic());
@@ -192,7 +227,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                 log.warn("the consumer's subscription not exist, group: {}, topic:{}", requestHeader.getConsumerGroup(), requestHeader.getTopic());
                 response.setCode(ResponseCode.SUBSCRIPTION_NOT_EXIST);
                 response.setRemark("the consumer's subscription not exist" + FAQUrl.suggestTodo(FAQUrl.SAME_GROUP_DIFFERENT_TOPIC));
-                return response;
+                return CompletableFuture.completedFuture(request);
             }
 
             if (subscriptionData.getSubVersion() < requestHeader.getSubVersion()) {
@@ -200,7 +235,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                     subscriptionData.getSubString());
                 response.setCode(ResponseCode.SUBSCRIPTION_NOT_LATEST);
                 response.setRemark("the consumer's subscription not latest");
-                return response;
+                return CompletableFuture.completedFuture(request);
             }
             if (!ExpressionType.isTagType(subscriptionData.getExpressionType())) {
                 consumerFilterData = this.brokerController.getConsumerFilterManager().get(requestHeader.getTopic(),
@@ -208,14 +243,14 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                 if (consumerFilterData == null) {
                     response.setCode(ResponseCode.FILTER_DATA_NOT_EXIST);
                     response.setRemark("The broker's consumer filter data is not exist!Your expression may be wrong!");
-                    return response;
+                    return CompletableFuture.completedFuture(request);
                 }
                 if (consumerFilterData.getClientVersion() < requestHeader.getSubVersion()) {
                     log.warn("The broker's consumer filter data is not latest, group: {}, topic: {}, serverV: {}, clientV: {}",
                         requestHeader.getConsumerGroup(), requestHeader.getTopic(), consumerFilterData.getClientVersion(), requestHeader.getSubVersion());
                     response.setCode(ResponseCode.FILTER_DATA_NOT_LATEST);
                     response.setRemark("the consumer's consumer filter data not latest");
-                    return response;
+                    return CompletableFuture.completedFuture(request);
                 }
             }
         }
@@ -224,7 +259,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
             && !this.brokerController.getBrokerConfig().isEnablePropertyFilter()) {
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark("The broker does not support consumer to filter message by " + subscriptionData.getExpressionType());
-            return response;
+            return CompletableFuture.completedFuture(request);
         }
 
         MessageFilter messageFilter;
@@ -310,7 +345,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                     response.setCode(ResponseCode.PULL_OFFSET_MOVED);
                     // XXX: warn and notify me
                     log.info("the request offset: {} over flow badly, broker max offset: {}, consumer: {}",
-                        requestHeader.getQueueOffset(), getMessageResult.getMaxOffset(), channel.remoteAddress());
+                        requestHeader.getQueueOffset(), getMessageResult.getMaxOffset(), remoteAddressSupplier.remoteAddress());
                     break;
                 case OFFSET_OVERFLOW_ONE:
                     response.setCode(ResponseCode.PULL_NOT_FOUND);
@@ -319,7 +354,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                     response.setCode(ResponseCode.PULL_OFFSET_MOVED);
                     log.info("the request offset too small. group={}, topic={}, requestOffset={}, brokerMinOffset={}, clientIp={}",
                         requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueOffset(),
-                        getMessageResult.getMinOffset(), channel.remoteAddress());
+                        getMessageResult.getMinOffset(), remoteAddressSupplier.remoteAddress());
                     break;
                 default:
                     assert false;
@@ -388,21 +423,13 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                         try {
                             FileRegion fileRegion =
                                 new ManyMessageTransfer(response.encodeHeader(getMessageResult.getBufferTotalSize()), getMessageResult);
-                            channel.writeAndFlush(fileRegion).addListener(new ChannelFutureListener() {
-                                @Override
-                                public void operationComplete(ChannelFuture future) throws Exception {
-                                    getMessageResult.release();
-                                    if (!future.isSuccess()) {
-                                        log.error("transfer many message by pagecache failed, {}", channel.remoteAddress(), future.cause());
-                                    }
-                                }
-                            });
+                            Runnable releasingCallback = getMessageResult::release;
+                            response.setAttachment(fileRegion);
+                            response.setFinallyCallback(releasingCallback);
                         } catch (Throwable e) {
-                            log.error("transfer many message by pagecache exception", e);
+                            log.error("gathering many-message-transfer exception", e);
                             getMessageResult.release();
                         }
-
-                        response = null;
                     }
                     break;
                 case ResponseCode.PULL_NOT_FOUND:
@@ -416,10 +443,13 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                         String topic = requestHeader.getTopic();
                         long offset = requestHeader.getQueueOffset();
                         int queueId = requestHeader.getQueueId();
-                        PullRequest pullRequest = new PullRequest(request, channel, pollingTimeMills,
-                            this.brokerController.getMessageStore().now(), offset, subscriptionData, messageFilter);
+
+                        CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
+                        PullRequest pullRequest = new PullRequest(request, pollingTimeMills,
+                            this.brokerController.getMessageStore().now(), offset, subscriptionData, messageFilter, future,
+                            remoteAddressSupplier, fastFailCallback);
                         this.brokerController.getPullRequestHoldService().suspendPullRequest(topic, queueId, pullRequest);
-                        response = null;
+                        response.setAsyncFuture(future);
                         break;
                     }
 
@@ -465,10 +495,15 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
         storeOffsetEnable = storeOffsetEnable
             && this.brokerController.getMessageStoreConfig().getBrokerRole() != BrokerRole.SLAVE;
         if (storeOffsetEnable) {
-            this.brokerController.getConsumerOffsetManager().commitOffset(RemotingHelper.parseChannelRemoteAddr(channel),
+            this.brokerController.getConsumerOffsetManager().commitOffset(remoteAddressSupplier.channelRemoteAddr(),
                 requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueId(), requestHeader.getCommitOffset());
         }
-        return response;
+
+        if (response.getAsyncFuture() != null) {
+            return response.getAsyncFuture();
+        } else {
+            return CompletableFuture.completedFuture(response);
+        }
     }
 
     public boolean hasConsumeMessageHook() {
@@ -546,41 +581,26 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
         }
     }
 
-    public void executeRequestWhenWakeup(final Channel channel,
-        final RemotingCommand request) throws RemotingCommandException {
+    public void executeRequestWhenWakeup(final RemotingCommand request,
+                                         final CompletableFuture<RemotingCommand> future,
+                                         RemoteAddressSupplier remoteAddressSupplier,
+                                         Consumer<RemotingCommand> fastFailCallback) {
         Runnable run = new Runnable() {
             @Override
             public void run() {
                 try {
-                    final RemotingCommand response = PullMessageProcessor.this.processRequest(channel, request, false);
-
+                    final RemotingCommand response = PullMessageProcessor.this.syncPullMessage(request, remoteAddressSupplier, fastFailCallback);
                     if (response != null) {
                         response.setOpaque(request.getOpaque());
                         response.markResponseType();
-                        try {
-                            channel.writeAndFlush(response).addListener(new ChannelFutureListener() {
-                                @Override
-                                public void operationComplete(ChannelFuture future) throws Exception {
-                                    if (!future.isSuccess()) {
-                                        log.error("processRequestWrapper response to {} failed",
-                                            future.channel().remoteAddress(), future.cause());
-                                        log.error(request.toString());
-                                        log.error(response.toString());
-                                    }
-                                }
-                            });
-                        } catch (Throwable e) {
-                            log.error("processRequestWrapper process request over, but response failed", e);
-                            log.error(request.toString());
-                            log.error(response.toString());
-                        }
                     }
+                    future.complete(response);
                 } catch (RemotingCommandException e1) {
                     log.error("excuteRequestWhenWakeup run", e1);
                 }
             }
         };
-        this.brokerController.getPullMessageExecutor().submit(new RequestTask(run, channel, request));
+        this.brokerController.getLongPollingExecutor().submit(new RequestTask(run, request, fastFailCallback));
     }
 
     public void registerConsumeMessageHook(List<ConsumeMessageHook> consumeMessageHookList) {

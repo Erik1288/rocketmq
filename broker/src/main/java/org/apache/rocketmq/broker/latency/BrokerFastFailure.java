@@ -86,6 +86,9 @@ public class BrokerFastFailure {
         cleanExpiredRequestInQueue(this.brokerController.getPullThreadPoolQueue(),
             this.brokerController.getBrokerConfig().getWaitTimeMillsInPullQueue());
 
+        cleanExpiredRequestInQueue(this.brokerController.getLongPollingThreadPoolQueue(),
+                this.brokerController.getBrokerConfig().getWaitTimeMillsInLongPollingQueue());
+
         cleanExpiredRequestInQueue(this.brokerController.getHeartbeatThreadPoolQueue(),
             this.brokerController.getBrokerConfig().getWaitTimeMillsInHeartbeatQueue());
 

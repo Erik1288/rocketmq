@@ -28,7 +28,7 @@ public class Producer {
         DefaultMQProducer producer = new DefaultMQProducer("ProducerGroupName");
         producer.start();
 
-        for (int i = 0; i < 128; i++)
+        for (int i = 0; i < 1; i++)
             try {
                 {
                     Message msg = new Message("TopicTest",
@@ -37,6 +37,7 @@ public class Producer {
                         "Hello world".getBytes(RemotingHelper.DEFAULT_CHARSET));
                     SendResult sendResult = producer.send(msg);
                     System.out.printf("%s%n", sendResult);
+                    Thread.sleep(1000);
                 }
 
             } catch (Exception e) {
