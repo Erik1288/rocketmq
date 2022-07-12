@@ -194,4 +194,6 @@ public class RequestCode {
     public static final int GET_ALL_PRODUCER_INFO = 328;
 
     public static final int DELETE_EXPIRED_COMMITLOG = 329;
+
+    public static final int COMMON_BATCH_REQUEST = 666;
 }

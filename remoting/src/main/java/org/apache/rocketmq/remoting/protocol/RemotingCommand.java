@@ -22,8 +22,12 @@ import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Modifier;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.rocketmq.logging.InternalLogger;
@@ -159,12 +163,30 @@ public class RemotingCommand {
         return decode(byteBuffer);
     }
 
+    /**
+     * This method will take in a buffer with 4 bytes stripped.
+     */
     public static RemotingCommand decode(final ByteBuffer byteBuffer) throws RemotingCommandException {
-        return decode(Unpooled.wrappedBuffer(byteBuffer));
+        int length = byteBuffer.remaining();
+        return decode(Unpooled.wrappedBuffer(byteBuffer), length);
     }
 
+    /**
+     * This method will take in a buffer with 4 bytes stripped.
+     */
+    public static RemotingCommand decode(final ByteBuffer byteBuffer, final int length) throws RemotingCommandException {
+        return decode(Unpooled.wrappedBuffer(byteBuffer), length);
+    }
+
+    /**
+     * This method will take in a buffer with 4 bytes stripped.
+     */
     public static RemotingCommand decode(final ByteBuf byteBuffer) throws RemotingCommandException {
         int length = byteBuffer.readableBytes();
+        return decode(byteBuffer, length);
+    }
+
+    public static RemotingCommand decode(final ByteBuf byteBuffer, final int length) throws RemotingCommandException {
         int oriHeaderLen = byteBuffer.readInt();
         int headerLength = getHeaderLength(oriHeaderLen);
         if (headerLength > length - 4) {
@@ -624,5 +646,81 @@ public class RemotingCommand {
 
     public void setSerializeTypeCurrentRPC(SerializeType serializeTypeCurrentRPC) {
         this.serializeTypeCurrentRPC = serializeTypeCurrentRPC;
+    }
+
+    /**
+     * Parse a batch request or response into list.
+     * @param batch batch request or response
+     * @return batch
+     */
+    public static List<RemotingCommand> parseChildren(RemotingCommand batch) throws RemotingCommandException {
+        if (batch == null) {
+            throw new IllegalArgumentException("parameter is null");
+        }
+
+        Map<Integer, RemotingCommand> children = new HashMap<>();
+        ByteBuffer childrenBuffer = ByteBuffer.wrap(batch.body);
+
+        int progress = 0;
+        while (childrenBuffer.hasRemaining()) {
+            // strip 4 bytes, just like how NettyDecoder does while decoding buffer.
+            int childPacketSize = childrenBuffer.getInt();
+            // need protection
+            RemotingCommand child = RemotingCommand.decode(childrenBuffer, childPacketSize);
+            RemotingCommand previous = children.put(child.getOpaque(), child);
+            if (previous != null) {
+                throw new RuntimeException("duplicated key " + child.getOpaque());
+            }
+
+            progress += (childPacketSize + 4);
+            childrenBuffer.position(progress);
+        }
+
+        assert children.size() > 0;
+        return new ArrayList<>(children.values());
+    }
+
+    /**
+     * Merge requests or responses into one batch.
+     * @param children requests or responses
+     * @return batch
+     */
+    public static RemotingCommand mergeChildren(List<RemotingCommand> children) {
+        RemotingCommand batch = new RemotingCommand();
+        List<ByteBuffer> batchBuffers = new ArrayList<>(children.size());
+
+        Set<Integer> opaques = new HashSet<>(children.size());
+        int batchTotalSize = 0;
+        for (RemotingCommand child : children) {
+            boolean added = opaques.add(child.getOpaque());
+            if (!added) {
+                throw new RuntimeException("duplicated key " + child.getOpaque());
+            }
+
+            ByteBuffer childHeader = child.encodeHeader();
+            int childContentSize = childHeader.getInt();
+            batchBuffers.add(childHeader);
+            if (child.getBody() != null) {
+                batchBuffers.add(ByteBuffer.wrap(child.getBody()));
+            }
+            batchTotalSize += (childContentSize + 4);
+        }
+
+        // need protection
+        ByteBuffer total = ByteBuffer.allocate(batchTotalSize);
+        for (ByteBuffer part : batchBuffers) {
+            part.position(0);
+            total.put(part);
+        }
+
+        batch.setBody(total.array());
+        return batch;
+    }
+
+    public static RemotingCommand createResponse(Integer opaque, int code, String remark) {
+        RemotingCommand response = RemotingCommand.createResponseCommand(code, remark);
+        response.setOpaque(opaque);
+        response.setCode(code);
+        return response;
     }
 }

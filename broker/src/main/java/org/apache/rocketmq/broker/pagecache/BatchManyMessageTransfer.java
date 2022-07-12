@@ -18,34 +18,28 @@ package org.apache.rocketmq.broker.pagecache;
 
 import io.netty.channel.FileRegion;
 import io.netty.util.AbstractReferenceCounted;
+
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
 import java.util.List;
-import org.apache.rocketmq.store.GetMessageResult;
 
-public class ManyMessageTransfer extends AbstractReferenceCounted implements FileRegion {
-    private final ByteBuffer byteBufferHeader;
-    private final GetMessageResult getMessageResult;
+public class BatchManyMessageTransfer extends AbstractReferenceCounted implements FileRegion {
+    private final ByteBuffer batchHeader;
+    private final List<ManyMessageTransfer> manyMessageTransferList;
+    private long transferred = 0;
 
-    /**
-     * Bytes which were transferred already.
-     */
-    private long transferred;
-
-    public ManyMessageTransfer(ByteBuffer byteBufferHeader, GetMessageResult getMessageResult) {
-        this.byteBufferHeader = byteBufferHeader;
-        this.getMessageResult = getMessageResult;
+    public BatchManyMessageTransfer(ByteBuffer batchHeader, List<ManyMessageTransfer> manyMessageTransferList) {
+        this.batchHeader = batchHeader;
+        this.manyMessageTransferList = manyMessageTransferList;
     }
 
     @Override
     public long position() {
-        int pos = byteBufferHeader.position();
-        List<ByteBuffer> messageBufferList = this.getMessageResult.getMessageBufferList();
-        for (ByteBuffer bb : messageBufferList) {
-            pos += bb.position();
-        }
-        return pos;
+        return batchHeader.position() + manyMessageTransferList
+                .stream()
+                .mapToLong(ManyMessageTransfer::position)
+                .sum();
     }
 
     @Override
@@ -60,25 +54,30 @@ public class ManyMessageTransfer extends AbstractReferenceCounted implements Fil
 
     @Override
     public long count() {
-        return byteBufferHeader.limit() + this.getMessageResult.getBufferTotalSize();
+        return batchHeader.limit() + manyMessageTransferList
+                .stream()
+                .mapToLong(ManyMessageTransfer::count)
+                .sum();
     }
 
     @Override
     public long transferTo(WritableByteChannel target, long position) throws IOException {
-        if (this.byteBufferHeader.hasRemaining()) {
-            transferred += target.write(this.byteBufferHeader);
-            return transferred;
-        } else {
-            List<ByteBuffer> messageBufferList = this.getMessageResult.getMessageBufferList();
-            for (ByteBuffer bb : messageBufferList) {
-                if (bb.hasRemaining()) {
-                    transferred += target.write(bb);
-                    return transferred;
-                }
+        // batch-header
+        if (this.batchHeader.hasRemaining()) {
+            transferred += target.write(this.batchHeader);
+        }
+        // batch-body
+        for (ManyMessageTransfer manyMessageTransfer : manyMessageTransferList) {
+            while (!manyMessageTransfer.isComplete()) {
+                transferred += manyMessageTransfer.transferTo(target, position);
             }
         }
+        return transferred;
+    }
 
-        return 0;
+    @Override
+    protected void deallocate() {
+        manyMessageTransferList.forEach(ManyMessageTransfer::deallocate);
     }
 
     @Override
@@ -104,15 +103,6 @@ public class ManyMessageTransfer extends AbstractReferenceCounted implements Fil
     }
 
     public void close() {
-        this.deallocate();
-    }
-
-    @Override
-    protected void deallocate() {
-        this.getMessageResult.release();
-    }
-
-    public boolean isComplete() {
-        return transferred == count();
+        manyMessageTransferList.forEach(ManyMessageTransfer::close);
     }
 }

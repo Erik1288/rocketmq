@@ -81,11 +81,6 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
     }
 
     @Override
-    public CompletableFuture<RemotingCommand> asyncProcessRequest(ChannelHandlerContext ctx, RemotingCommand request, RemotingResponseCallback responseCallback) throws Exception {
-        return asyncProcessRequest(ctx, request).thenComposeAsync(responseCallback::callback, this.brokerController.getPullMessageExecutor());
-    }
-
-    @Override
     public RemotingCommand processRequest(final ChannelHandlerContext ctx,
         RemotingCommand request) throws RemotingCommandException {
         RemoteAddressSupplier remoteAddressSupplier = new RemoteAddressSupplier(ctx.channel());
@@ -413,6 +408,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                         getMessageResult.getBufferTotalSize());
 
                     this.brokerController.getBrokerStatsManager().incBrokerGetNums(getMessageResult.getMessageCount());
+                    // TODO consistency config in a batch
                     if (this.brokerController.getBrokerConfig().isTransferMsgByHeap()) {
                         final byte[] r = this.readGetMessageResult(getMessageResult, requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueId());
                         this.brokerController.getBrokerStatsManager().incGroupGetLatency(requestHeader.getConsumerGroup(),
@@ -594,7 +590,11 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                         response.setOpaque(request.getOpaque());
                         response.markResponseType();
                     }
-                    future.complete(response);
+                    boolean triggered = future.complete(response);
+                    if (!triggered && response != null && response.getFinallyCallback() != null) {
+                        // It means other thread has completed this future.
+                        response.getFinallyCallback().run();
+                    }
                 } catch (RemotingCommandException e1) {
                     log.error("excuteRequestWhenWakeup run", e1);
                 }

@@ -64,6 +64,7 @@ public class BrokerConfig {
     private int pullMessageThreadPoolNums = 16 + Runtime.getRuntime().availableProcessors() * 2;
     private int processReplyMessageThreadPoolNums = 16 + Runtime.getRuntime().availableProcessors() * 2;
     private int queryMessageThreadPoolNums = 8 + Runtime.getRuntime().availableProcessors();
+    private int commonBatchThreadPoolNums = Math.min(Runtime.getRuntime().availableProcessors(), 4);
 
     private int adminBrokerThreadPoolNums = 16;
     private int clientManageThreadPoolNums = 32;
@@ -853,5 +854,13 @@ public class BrokerConfig {
 
     public void setIsolateLogEnable(boolean isolateLogEnable) {
         this.isolateLogEnable = isolateLogEnable;
+    }
+
+    public int getCommonBatchThreadPoolNums() {
+        return commonBatchThreadPoolNums;
+    }
+
+    public void setCommonBatchThreadPoolNums(int commonBatchThreadPoolNums) {
+        this.commonBatchThreadPoolNums = commonBatchThreadPoolNums;
     }
 }
