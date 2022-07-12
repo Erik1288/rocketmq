@@ -22,8 +22,10 @@ import io.netty.channel.FileRegion;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.client.ConsumerGroupInfo;
@@ -78,6 +80,11 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
 
     public PullMessageProcessor(final BrokerController brokerController) {
         this.brokerController = brokerController;
+    }
+
+    @Override
+    public CompletableFuture<RemotingCommand> asyncProcessRequest(ChannelHandlerContext ctx, RemotingCommand request, RemotingResponseCallback responseCallback) throws Exception {
+        return asyncProcessRequest(ctx, request).thenCompose(responseCallback::callback);
     }
 
     @Override

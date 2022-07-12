@@ -22,6 +22,7 @@ import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.common.protocol.RequestCode;
 import org.apache.rocketmq.common.protocol.header.PullMessageRequestHeader;
 import org.apache.rocketmq.common.protocol.header.SendMessageRequestHeader;
+import org.apache.rocketmq.common.sysflag.PullSysFlag;
 import org.apache.rocketmq.remoting.common.RemotingHelper;
 import org.apache.rocketmq.remoting.netty.RemotingResponseCallback;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
@@ -48,7 +49,7 @@ public class BatchProtocolTest {
         requestHeader.setQueueId(queue);
         requestHeader.setQueueOffset(offset);
         requestHeader.setMaxMsgNums(maxMsgNums);
-        requestHeader.setSysFlag(0);
+        requestHeader.setSysFlag(PullSysFlag.buildSysFlag(true, true, false, false));
         requestHeader.setCommitOffset(0L);
         requestHeader.setSuspendTimeoutMillis(10000L);
         requestHeader.setSubscription(null);
