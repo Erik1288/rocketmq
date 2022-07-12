@@ -42,7 +42,6 @@ import org.apache.rocketmq.remoting.netty.NettyServerConfig;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 import org.apache.rocketmq.store.config.MessageStoreConfig;
 import org.junit.After;
-import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -56,6 +55,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
@@ -65,13 +65,14 @@ import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.class)
 public class BatchProtocolTestPullTest extends BatchProtocolTest {
-    private ClientChannelInfo clientChannelInfo;
     private BrokerConfig brokerConfig;
     private List<String> topics = new ArrayList<>();
-    private String subscriptionGroup = "subscription-group";
+    private String consumerGroup = "consumer-group";
+    private String producerGroup = "producer-group";
     private int totalRequestNum = 20;
     private Integer queue = 0;
-    private String producerGroup = "producer-group";
+    private String topicPrefix = "batch-protocol-";
+    private Random random = new Random();
 
     @Before
     public void init() throws Exception {
@@ -89,14 +90,12 @@ public class BatchProtocolTestPullTest extends BatchProtocolTest {
         when(mockChannel.remoteAddress()).thenReturn(new InetSocketAddress(1024));
         when(ctx.channel()).thenReturn(mockChannel);
         when(ctx.channel().isWritable()).thenReturn(true);
-        clientChannelInfo = new ClientChannelInfo(mockChannel);
-
-        String topicPrefix = "batch-protocol";
+        ClientChannelInfo clientChannelInfo = new ClientChannelInfo(mockChannel);
 
         // prepare topics
         TopicConfigManager topicConfigManager = brokerController.getTopicConfigManager();
         for (int i = 0; i < totalRequestNum; i++) {
-            String topic = topicPrefix + "-" + i;
+            String topic = topicPrefix + i;
             topicConfigManager.getTopicConfigTable().put(topic, new TopicConfig(topic));
             topics.add(topic);
         }
@@ -104,13 +103,13 @@ public class BatchProtocolTestPullTest extends BatchProtocolTest {
         // prepare subscribe group
         SubscriptionGroupManager subscriptionGroupManager = brokerController.getSubscriptionGroupManager();
         SubscriptionGroupConfig subscriptionGroupConfig = new SubscriptionGroupConfig();
-        subscriptionGroupConfig.setGroupName(subscriptionGroup);
+        subscriptionGroupConfig.setGroupName(consumerGroup);
         subscriptionGroupManager.updateSubscriptionGroupConfig(subscriptionGroupConfig);
 
-        ConsumerData consumerData = createConsumerData(subscriptionGroup, topics);
+        ConsumerData consumerData = createConsumerData(consumerGroup, topics);
         brokerController.getConsumerManager().registerConsumer(
                 consumerData.getGroupName(),
-                this.clientChannelInfo,
+                clientChannelInfo,
                 consumerData.getConsumeType(),
                 consumerData.getMessageModel(),
                 consumerData.getConsumeFromWhere(),
@@ -138,7 +137,7 @@ public class BatchProtocolTestPullTest extends BatchProtocolTest {
 
         Long offset = 0L;
         for (String topic : topics) {
-            RemotingCommand childPullRequest = createPullRequest(subscriptionGroup, topic, queue, offset);
+            RemotingCommand childPullRequest = createPullRequest(consumerGroup, topic, queue, offset);
             expectedRequests.put(childPullRequest.getOpaque(), childPullRequest);
         }
 
@@ -157,8 +156,8 @@ public class BatchProtocolTestPullTest extends BatchProtocolTest {
         // assertion on responses.
         for (RemotingCommand actualChildResponse : childResponses) {
             int opaque = actualChildResponse.getOpaque();
-            Assert.assertTrue(expectedRequests.containsKey(opaque));
-            Assert.assertNotNull(actualChildResponse.getBody());
+            assertThat(expectedRequests).containsKey(opaque);
+            assertThat(actualChildResponse.getBody()).isNotNull();
 
             PullMessageResponseHeader responseHeader =
                     (PullMessageResponseHeader) actualChildResponse.decodeCommandCustomHeader(PullMessageResponseHeader.class);
@@ -183,7 +182,7 @@ public class BatchProtocolTestPullTest extends BatchProtocolTest {
 
         Long offset = 0L;
         for (String topic : topics) {
-            RemotingCommand childPullRequest = createPullRequest(subscriptionGroup, topic, queue, offset);
+            RemotingCommand childPullRequest = createPullRequest(consumerGroup, topic, queue, offset);
             expectedRequests.put(childPullRequest.getOpaque(), childPullRequest);
         }
 
@@ -209,12 +208,12 @@ public class BatchProtocolTestPullTest extends BatchProtocolTest {
         RemotingCommand decodeBatchResponse = RemotingCommand.decode(batchResponseBuf);
 
         List<RemotingCommand> childResponses = RemotingCommand.parseChildren(decodeBatchResponse);
-        Assert.assertEquals(totalRequestNum, childResponses.size());
+        assertThat(childResponses).hasSize(totalRequestNum);
 
         for (RemotingCommand actualChildResponse : childResponses) {
             int opaque = actualChildResponse.getOpaque();
-            Assert.assertTrue(expectedRequests.containsKey(opaque));
-            Assert.assertNotNull(actualChildResponse.getBody());
+            assertThat(expectedRequests).containsKey(opaque);
+            assertThat(actualChildResponse.getBody()).isNotNull();
 
             PullMessageResponseHeader responseHeader =
                     (PullMessageResponseHeader) actualChildResponse.decodeCommandCustomHeader(PullMessageResponseHeader.class);
@@ -228,20 +227,13 @@ public class BatchProtocolTestPullTest extends BatchProtocolTest {
     public void testPartialPullLongPollingBatchProtocol() throws Exception {
         CommonBatchProcessor commonBatchProcessor = brokerController.getCommonBatchProcessor();
 
-        // send some message to topics to make sure there are at least 1 message in queue.
-        for (String topic : topics) {
-            RemotingCommand sendRequest = createSendRequest(producerGroup, topic, queue);
-            RemotingCommand sendResponse = brokerController.getSendProcessor().processRequest(ctx, sendRequest);
-            assertThat(sendResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
-        }
-
         Map<Integer, RemotingCommand> childRequests = new HashMap<>();
 
         // make sure [longPollingTopic] won't get message.
-        Long offset = 1L;
+        Long offset = 0L;
         Integer longPollingOpaque = null;
         for (String topic : topics) {
-            RemotingCommand childPullRequest = createPullRequest(subscriptionGroup, topic, queue, offset);
+            RemotingCommand childPullRequest = createPullRequest(consumerGroup, topic, queue, offset);
             childRequests.put(childPullRequest.getOpaque(), childPullRequest);
 
             if (topic.endsWith("16")) {
@@ -252,8 +244,6 @@ public class BatchProtocolTestPullTest extends BatchProtocolTest {
             RemotingCommand sendResponse = brokerController.getSendProcessor().processRequest(ctx, sendRequest);
             assertThat(sendResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
         }
-
-        System.out.println(longPollingOpaque);
 
         RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(childRequests.values()));
         batchRequest.setRemark(CommonBatchProcessor.DISPATCH_PULL);
@@ -272,13 +262,62 @@ public class BatchProtocolTestPullTest extends BatchProtocolTest {
             int opaque = actualChildResponse.getOpaque();
             assertThat(childRequests).containsKey(opaque);
 
-            RemotingCommand childRequest = childRequests.get(opaque);
+            if (Objects.equals(longPollingOpaque, opaque)) {
+                assertThat(actualChildResponse.getCode()).isEqualTo(ResponseCode.PULL_NOT_FOUND);
+                assertThat(actualChildResponse.getRemark()).isEqualTo(MergeBatchResponseStrategy.REMARK_PULL_NOT_FOUND);
+            } else {
+                assertThat(actualChildResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
+            }
+        }
+    }
 
-            // if (Objects.equals(longPollingTopic, opaque)) {
-            //     assertThat(actualChildResponse.getCode()).isEqualTo(ResponseCode.PULL_NOT_FOUND);
-            // } else {
-            //     assertThat(actualChildResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
-            // }
+    @Test
+    public void testPullLongPollingBatchProtocol() throws Exception {
+        CommonBatchProcessor commonBatchProcessor = brokerController.getCommonBatchProcessor();
+
+        Map<Integer, RemotingCommand> childRequests = new HashMap<>();
+        Map<Integer, String> opaqueToTopic = new HashMap<>();
+
+        Long offset = 0L;
+        for (String topic : topics) {
+            RemotingCommand childPullRequest = createPullRequest(consumerGroup, topic, queue, offset);
+            childRequests.put(childPullRequest.getOpaque(), childPullRequest);
+            opaqueToTopic.put(childPullRequest.getOpaque(), topic);
+        }
+
+        RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(childRequests.values()));
+        batchRequest.setRemark(CommonBatchProcessor.DISPATCH_PULL);
+
+        // turn [zero-copy] off
+        this.brokerConfig.setTransferMsgByHeap(true);
+        CompletableFuture<RemotingCommand> batchFuture = commonBatchProcessor.asyncProcessRequest(ctx, batchRequest, callback);
+
+        assertThat(batchFuture.isDone()).isFalse();
+
+        String sendDataToRandomTopic = topicPrefix + random.nextInt(totalRequestNum);
+        RemotingCommand sendRequest = createSendRequest(producerGroup, sendDataToRandomTopic, queue);
+        RemotingCommand sendResponse = brokerController.getSendProcessor().processRequest(ctx, sendRequest);
+        assertThat(sendResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
+
+        Thread.sleep(1000);
+        assertThat(batchFuture.isDone()).isTrue();
+
+        RemotingCommand batchResponse = batchFuture.get();
+        List<RemotingCommand> childResponses = RemotingCommand.parseChildren(batchResponse);
+        assertThat(childResponses).hasSize(totalRequestNum);
+
+        // assertion on responses.
+        for (RemotingCommand actualChildResponse : childResponses) {
+            int opaque = actualChildResponse.getOpaque();
+            assertThat(childRequests).containsKey(opaque);
+
+            if (Objects.equals(opaqueToTopic.get(opaque), sendDataToRandomTopic)) {
+                // has data
+                assertThat(actualChildResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
+            } else {
+                // has no data
+                assertThat(actualChildResponse.getCode()).isEqualTo(ResponseCode.PULL_NOT_FOUND);
+            }
         }
     }
 

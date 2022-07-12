@@ -99,6 +99,7 @@ public class ConsumerManageProcessor extends AsyncNettyRequestProcessor {
 
         response.setCode(ResponseCode.SYSTEM_ERROR);
         response.setRemark("no consumer for this group, " + requestHeader.getConsumerGroup());
+        response.setOpaque(request.getOpaque());
         return response;
     }
 
@@ -113,6 +114,7 @@ public class ConsumerManageProcessor extends AsyncNettyRequestProcessor {
             requestHeader.getTopic(), requestHeader.getQueueId(), requestHeader.getCommitOffset());
         response.setCode(ResponseCode.SUCCESS);
         response.setRemark(null);
+        response.setOpaque(request.getOpaque());
         return response;
     }
 

@@ -45,6 +45,12 @@ import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.class)
 public class BatchProtocolTestSendTest extends BatchProtocolTest {
+    private final int totalRequestNum = 20;
+    private final Integer queue = 0;
+    private final String producerGroup = "producer-group";
+    private final String topicPrefix = "batch-protocol-";
+    private final List<String> topics = new ArrayList<>();
+
     @Before
     public void init() throws Exception {
         this.brokerController = new BrokerController(
@@ -59,6 +65,14 @@ public class BatchProtocolTestSendTest extends BatchProtocolTest {
         when(mockChannel.remoteAddress()).thenReturn(new InetSocketAddress(1024));
         when(ctx.channel()).thenReturn(mockChannel);
         when(ctx.channel().isWritable()).thenReturn(true);
+
+        // prepare topics
+        TopicConfigManager topicConfigManager = brokerController.getTopicConfigManager();
+        for (int i = 0; i < totalRequestNum; i++) {
+            String topic = topicPrefix + i;
+            topicConfigManager.getTopicConfigTable().put(topic, new TopicConfig(topic));
+            topics.add(topic);
+        }
     }
 
     @After
@@ -69,18 +83,10 @@ public class BatchProtocolTestSendTest extends BatchProtocolTest {
     @Test
     public void testSendBatchProtocol() throws Exception {
         CommonBatchProcessor commonBatchProcessor = brokerController.getCommonBatchProcessor();
-        int totalRequestNum = 20;
-        String producerGroup = "producer-group";
-        String topicPrefix = "batch-protocol";
-        Integer queue = 0;
-
-        TopicConfigManager topicConfigManager = brokerController.getTopicConfigManager();
 
         Map<Integer, RemotingCommand> expectedRequests = new HashMap<>();
-
         for (int i = 0; i < totalRequestNum; i++) {
             String topic = topicPrefix + "-" + i;
-            topicConfigManager.getTopicConfigTable().put(topic, new TopicConfig(topic));
             RemotingCommand childSendRequest = createSendRequest(producerGroup, topic, queue);
             expectedRequests.put(childSendRequest.getOpaque(), childSendRequest);
         }
@@ -94,7 +100,7 @@ public class BatchProtocolTestSendTest extends BatchProtocolTest {
 
         for (RemotingCommand actualChildResponse : childResponses) {
             int opaque = actualChildResponse.getOpaque();
-            Assert.assertTrue(expectedRequests.containsKey(opaque));
+            assertThat(expectedRequests).containsKey(opaque);
         }
     }
 

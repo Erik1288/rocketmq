@@ -21,7 +21,9 @@ import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.common.protocol.RequestCode;
 import org.apache.rocketmq.common.protocol.header.PullMessageRequestHeader;
+import org.apache.rocketmq.common.protocol.header.QueryConsumerOffsetRequestHeader;
 import org.apache.rocketmq.common.protocol.header.SendMessageRequestHeader;
+import org.apache.rocketmq.common.protocol.header.UpdateConsumerOffsetRequestHeader;
 import org.apache.rocketmq.common.sysflag.PullSysFlag;
 import org.apache.rocketmq.remoting.common.RemotingHelper;
 import org.apache.rocketmq.remoting.netty.RemotingResponseCallback;
@@ -40,7 +42,7 @@ public class BatchProtocolTest {
     @Mock
     protected ChannelHandlerContext ctx;
 
-    protected RemotingCommand createPullRequest(String consumerGroup, String topic, Integer queue, Long offset) throws UnsupportedEncodingException {
+    protected RemotingCommand createPullRequest(String consumerGroup, String topic, Integer queue, Long offset) {
         Integer maxMsgNums = 1000;
 
         PullMessageRequestHeader requestHeader = new PullMessageRequestHeader();
@@ -59,28 +61,27 @@ public class BatchProtocolTest {
         return RemotingCommand.createRequestCommand(RequestCode.PULL_MESSAGE, requestHeader);
     }
 
-    protected RemotingCommand createQueryOffsetRequest(String producerGroup, String topic, Integer queue) throws UnsupportedEncodingException {
-        Message msg = new Message(topic,
-                "TagA",
-                "OrderID188",
-                "Hello world".getBytes(RemotingHelper.DEFAULT_CHARSET));
-
-        SendMessageRequestHeader requestHeader = new SendMessageRequestHeader();
-        requestHeader.setProducerGroup(producerGroup);
+    protected RemotingCommand createQueryOffsetRequest(String consumerGroup, String topic, Integer queue) {
+        QueryConsumerOffsetRequestHeader requestHeader = new QueryConsumerOffsetRequestHeader();
         requestHeader.setTopic(topic);
-        requestHeader.setDefaultTopic("");
-        requestHeader.setDefaultTopicQueueNums(12);
+        requestHeader.setConsumerGroup(consumerGroup);
         requestHeader.setQueueId(queue);
-        requestHeader.setSysFlag(0);
-        requestHeader.setBornTimestamp(System.currentTimeMillis());
-        requestHeader.setFlag(0);
-        requestHeader.setReconsumeTimes(0);
-        requestHeader.setUnitMode(false);
-        requestHeader.setBatch(false);
 
-        RemotingCommand childSendRequest = RemotingCommand.createRequestCommand(RequestCode.QUERY_CONSUMER_OFFSET, requestHeader);
-        childSendRequest.setBody(msg.getBody());
-        return childSendRequest;
+        RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.QUERY_CONSUMER_OFFSET, requestHeader);
+        request.makeCustomHeaderToNet();
+        return request;
+    }
+
+    protected RemotingCommand createUpdateConsumerOffsetRequest(String consumeGroup, String topic, Integer queue, Long offset) {
+        UpdateConsumerOffsetRequestHeader requestHeader = new UpdateConsumerOffsetRequestHeader();
+        requestHeader.setConsumerGroup(consumeGroup);
+        requestHeader.setTopic(topic);
+        requestHeader.setQueueId(queue);
+        requestHeader.setCommitOffset(offset);
+
+        RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.UPDATE_CONSUMER_OFFSET, requestHeader);
+        request.makeCustomHeaderToNet();
+        return request;
     }
 
     protected RemotingCommand createSendRequest(String producerGroup, String topic, Integer queue) throws UnsupportedEncodingException {
@@ -102,9 +103,9 @@ public class BatchProtocolTest {
         requestHeader.setUnitMode(false);
         requestHeader.setBatch(false);
 
-        RemotingCommand childSendRequest = RemotingCommand.createRequestCommand(RequestCode.SEND_MESSAGE, requestHeader);
-        childSendRequest.makeCustomHeaderToNet();
-        childSendRequest.setBody(msg.getBody());
-        return childSendRequest;
+        RemotingCommand request = RemotingCommand.createRequestCommand(RequestCode.SEND_MESSAGE, requestHeader);
+        request.makeCustomHeaderToNet();
+        request.setBody(msg.getBody());
+        return request;
     }
 }
