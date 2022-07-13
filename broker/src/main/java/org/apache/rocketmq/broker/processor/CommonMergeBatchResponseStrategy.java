@@ -17,6 +17,10 @@
 package org.apache.rocketmq.broker.processor;
 
 import com.google.common.base.Preconditions;
+import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.logging.InternalLogger;
+import org.apache.rocketmq.logging.InternalLoggerFactory;
+import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
 import java.util.ArrayList;
@@ -28,6 +32,7 @@ import java.util.concurrent.ConcurrentMap;
 import static org.apache.rocketmq.remoting.protocol.RemotingSysResponseCode.SYSTEM_ERROR;
 
 public class CommonMergeBatchResponseStrategy extends MergeBatchResponseStrategy {
+    private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
 
     private CommonMergeBatchResponseStrategy() {
     }
@@ -37,24 +42,32 @@ public class CommonMergeBatchResponseStrategy extends MergeBatchResponseStrategy
     @Override
     public CompletableFuture<RemotingCommand> merge(
             Integer batchOpaque,
-            Map<Integer, CompletableFuture<RemotingCommand>> opaqueToFuture) {
+            Map<Integer, CompletableFuture<RemotingCommand>> opaqueToFuture) throws Exception {
         Preconditions.checkNotNull(batchOpaque, "batchOpaque shouldn't be null.");
         Preconditions.checkNotNull(opaqueToFuture, "opaqueToFuture shouldn't be null.");
+        Preconditions.checkArgument(!opaqueToFuture.isEmpty());
 
         CompletableFuture<RemotingCommand> batchFuture = new CompletableFuture<>();
         int expectedResponseNum = opaqueToFuture.size();
 
         ConcurrentHashMap<Integer, RemotingCommand> responses = new ConcurrentHashMap<>(expectedResponseNum);
 
-        opaqueToFuture.forEach((childOpaque, childFuture) -> childFuture.whenComplete((childResp, throwable) -> {
-            if (throwable != null) {
-                responses.put(childOpaque, RemotingCommand.createResponse(childOpaque, SYSTEM_ERROR, REMARK_SYSTEM_ERROR));
-            } else {
-                // TODO childResp may be null.
-                responses.put(childOpaque, childResp);
-            }
-            completeBatchFuture(batchFuture, responses, expectedResponseNum, batchOpaque);
-        }));
+        opaqueToFuture.forEach((childOpaque, childFuture) -> {
+            childFuture.whenComplete((childResp, throwable) -> {
+                if (throwable != null) {
+                    log.error("Something is wrong with pull-merging. batch: {}, child: {}.", batchOpaque, childOpaque, throwable);
+                    responses.put(childOpaque, RemotingCommand.createResponse(childOpaque, SYSTEM_ERROR, REMARK_SYSTEM_ERROR));
+                } else {
+                    responses.put(childOpaque, nonNullableResponse(childOpaque, childResp));
+                }
+                try {
+                    completeBatchFuture(batchFuture, responses, expectedResponseNum, batchOpaque);
+                } catch (Exception e) {
+                    log.error("completeBatchFuture failed. batch: {}, child: {}.", batchOpaque, childOpaque, e);
+                    batchFuture.complete(RemotingCommand.createResponse(batchOpaque, SYSTEM_ERROR, REMARK_SYSTEM_ERROR));
+                }
+            });
+        });
 
         return batchFuture;
     }
@@ -63,7 +76,7 @@ public class CommonMergeBatchResponseStrategy extends MergeBatchResponseStrategy
             CompletableFuture<RemotingCommand> batchFuture,
             ConcurrentMap<Integer, RemotingCommand> responses,
             int expectedResponseNum,
-            int batchOpaque) {
+            int batchOpaque) throws RemotingCommandException {
         if (responses.size() != expectedResponseNum) {
             return ;
         }

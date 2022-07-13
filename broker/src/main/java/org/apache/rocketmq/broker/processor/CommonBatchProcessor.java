@@ -18,6 +18,9 @@ package org.apache.rocketmq.broker.processor;
 
 import io.netty.channel.ChannelHandlerContext;
 import org.apache.rocketmq.broker.BrokerController;
+import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.logging.InternalLogger;
+import org.apache.rocketmq.logging.InternalLoggerFactory;
 import org.apache.rocketmq.remoting.netty.AsyncNettyRequestProcessor;
 import org.apache.rocketmq.remoting.netty.RemotingResponseCallback;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
@@ -29,6 +32,8 @@ import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 
 public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
+    private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
+
     public static final String DISPATCH_SEND = "Send";
     public static final String DISPATCH_PULL = "Pull";
     public static final String DISPATCH_CONSUMER_OFFSET = "ConsumerOffset";
@@ -49,7 +54,12 @@ public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
     }
 
     @Override
-    public CompletableFuture<RemotingCommand> asyncProcessRequest(ChannelHandlerContext ctx, RemotingCommand request, RemotingResponseCallback responseCallback) throws Exception {
+    public CompletableFuture<RemotingCommand> asyncProcessRequest(
+            ChannelHandlerContext ctx,
+            RemotingCommand request,
+            RemotingResponseCallback responseCallback) throws Exception {
+        log.debug("receive PullMessage request command, {}", request);
+
         AsyncNettyRequestProcessor asyncNettyRequestProcessor = dispatchProcessor(request);
         List<RemotingCommand> requestChildren = RemotingCommand.parseChildren(request);
 
@@ -62,7 +72,6 @@ public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
         }
 
         MergeBatchResponseStrategy strategy = selectStrategy(asyncNettyRequestProcessor);
-
         return strategy.merge(request.getOpaque(), opaqueToFuture);
     }
 
@@ -85,6 +94,7 @@ public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
         } else if (Objects.equals(DISPATCH_CONSUMER_OFFSET, remark)) {
             return this.brokerController.getConsumerManageProcessor();
         } else {
+            log.error("processor is not supported for {}.", remark);
             throw new RuntimeException("processor is not supported yet.");
         }
     }

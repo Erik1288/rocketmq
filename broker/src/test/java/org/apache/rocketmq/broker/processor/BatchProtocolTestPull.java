@@ -64,7 +64,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.class)
-public class BatchProtocolTestPullTest extends BatchProtocolTest {
+public class BatchProtocolTestPull extends BatchProtocol {
     private BrokerConfig brokerConfig;
     private List<String> topics = new ArrayList<>();
     private String consumerGroup = "consumer-group";
@@ -294,6 +294,7 @@ public class BatchProtocolTestPullTest extends BatchProtocolTest {
 
         assertThat(batchFuture.isDone()).isFalse();
 
+        // send a message trying to wake up batch-long-polling.
         String sendDataToRandomTopic = topicPrefix + random.nextInt(totalRequestNum);
         RemotingCommand sendRequest = createSendRequest(producerGroup, sendDataToRandomTopic, queue);
         RemotingCommand sendResponse = brokerController.getSendProcessor().processRequest(ctx, sendRequest);

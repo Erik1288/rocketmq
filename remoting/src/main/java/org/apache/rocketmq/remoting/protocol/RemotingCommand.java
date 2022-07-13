@@ -30,6 +30,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
+
+import com.google.common.base.Preconditions;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
 import org.apache.rocketmq.remoting.CommandCustomHeader;
@@ -91,7 +93,8 @@ public class RemotingCommand {
 
     private transient byte[] body;
 
-    // zero-copy
+    // use some sort of @JsonIgnore?
+    // zero-copy attachment
     private transient Object attachment;
     // async response future
     private transient CompletableFuture<RemotingCommand> asyncFuture;
@@ -649,14 +652,12 @@ public class RemotingCommand {
     }
 
     /**
-     * Parse a batch request or response into list.
+     * Parse a batch request or response into children.
      * @param batch batch request or response
-     * @return batch
+     * @return children requests or response
      */
     public static List<RemotingCommand> parseChildren(RemotingCommand batch) throws RemotingCommandException {
-        if (batch == null) {
-            throw new IllegalArgumentException("parameter is null");
-        }
+        Preconditions.checkNotNull(batch, "batch shouldn't be null.");
 
         Map<Integer, RemotingCommand> children = new HashMap<>();
         ByteBuffer childrenBuffer = ByteBuffer.wrap(batch.body);
@@ -669,7 +670,7 @@ public class RemotingCommand {
             RemotingCommand child = RemotingCommand.decode(childrenBuffer, childPacketSize);
             RemotingCommand previous = children.put(child.getOpaque(), child);
             if (previous != null) {
-                throw new RuntimeException("duplicated key " + child.getOpaque());
+                throw new RemotingCommandException("duplicated key " + child.getOpaque());
             }
 
             progress += (childPacketSize + 4);
@@ -685,7 +686,10 @@ public class RemotingCommand {
      * @param children requests or responses
      * @return batch
      */
-    public static RemotingCommand mergeChildren(List<RemotingCommand> children) {
+    public static RemotingCommand mergeChildren(List<RemotingCommand> children) throws RemotingCommandException {
+        Preconditions.checkNotNull(children, "children shouldn't be null.");
+        Preconditions.checkArgument(!children.isEmpty(), "children shouldn't be empty.");
+
         RemotingCommand batch = new RemotingCommand();
         List<ByteBuffer> batchBuffers = new ArrayList<>(children.size());
 
@@ -694,7 +698,7 @@ public class RemotingCommand {
         for (RemotingCommand child : children) {
             boolean added = opaques.add(child.getOpaque());
             if (!added) {
-                throw new RuntimeException("duplicated key " + child.getOpaque());
+                throw new RemotingCommandException("duplicated key " + child.getOpaque());
             }
 
             ByteBuffer childHeader = child.encodeHeader();

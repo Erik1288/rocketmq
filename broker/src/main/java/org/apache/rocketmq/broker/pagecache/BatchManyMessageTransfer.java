@@ -24,8 +24,33 @@ import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
 import java.util.List;
 
+/**
+ * Zero copy response for Batch-Protocol.
+ *
+ * The following diagram shows how a zero-copy response is constructed and which parts are zero-copy zones.
+ *
+ * Batch Packet Size,
+ * Batch Header Length,
+ * Batch Header,
+ * Body : [
+ *      Child1 Packet Size,
+ *      Child1 Header Length,
+ *      Child1 Header,
+ *      Child1 Body, (zero-copy zone)
+ *      Child2 Packet Size,
+ *      Child2 Header Length,
+ *      Child2 Header,
+ *      Child2 Body, (zero-copy zone)
+ *      Child3 Packet Size,
+ *      Child3 Header Length,
+ *      Child3 Header,
+ *      Child3 Body  (zero-copy zone)
+ * ]
+ */
 public class BatchManyMessageTransfer extends AbstractReferenceCounted implements FileRegion {
+    // batch-header
     private final ByteBuffer batchHeader;
+    // batch-body
     private final List<ManyMessageTransfer> manyMessageTransferList;
     private long transferred = 0;
 

@@ -44,11 +44,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.class)
-public class BatchProtocolTestConsumerManagerTest extends BatchProtocolTest {
+public class BatchProtocolTestSend extends BatchProtocol {
     private final int totalRequestNum = 20;
     private final Integer queue = 0;
+    private final String producerGroup = "producer-group";
     private final String topicPrefix = "batch-protocol-";
-    private final String consumerGroup = "consumer-group";
+    private final List<String> topics = new ArrayList<>();
 
     @Before
     public void init() throws Exception {
@@ -64,35 +65,35 @@ public class BatchProtocolTestConsumerManagerTest extends BatchProtocolTest {
         when(mockChannel.remoteAddress()).thenReturn(new InetSocketAddress(1024));
         when(ctx.channel()).thenReturn(mockChannel);
         when(ctx.channel().isWritable()).thenReturn(true);
+
+        // prepare topics
+        TopicConfigManager topicConfigManager = brokerController.getTopicConfigManager();
+        for (int i = 0; i < totalRequestNum; i++) {
+            String topic = topicPrefix + i;
+            topicConfigManager.getTopicConfigTable().put(topic, new TopicConfig(topic));
+            topics.add(topic);
+        }
     }
 
     @After
     public void after() {
-        brokerController.getMessageStore().shutdown();
         brokerController.getMessageStore().destroy();
     }
 
     @Test
-    public void testQueryOffsetBatchProtocol() throws Exception {
+    public void testSendBatchProtocol() throws Exception {
         CommonBatchProcessor commonBatchProcessor = brokerController.getCommonBatchProcessor();
 
-        TopicConfigManager topicConfigManager = brokerController.getTopicConfigManager();
-
         Map<Integer, RemotingCommand> expectedRequests = new HashMap<>();
-
         for (int i = 0; i < totalRequestNum; i++) {
             String topic = topicPrefix + "-" + i;
-            topicConfigManager.getTopicConfigTable().put(topic, new TopicConfig(topic));
-            RemotingCommand childSendRequest = createQueryOffsetRequest(consumerGroup, topic, queue);
+            RemotingCommand childSendRequest = createSendRequest(producerGroup, topic, queue);
             expectedRequests.put(childSendRequest.getOpaque(), childSendRequest);
         }
 
         RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(expectedRequests.values()));
-        batchRequest.setRemark(CommonBatchProcessor.DISPATCH_CONSUMER_OFFSET);
-
+        batchRequest.setRemark(CommonBatchProcessor.DISPATCH_SEND);
         CompletableFuture<RemotingCommand> batchFuture = commonBatchProcessor.asyncProcessRequest(ctx, batchRequest, callback);
-
-        assertThat(batchFuture.isDone()).isTrue();
         RemotingCommand batchResponse = batchFuture.get();
         List<RemotingCommand> childResponses = RemotingCommand.parseChildren(batchResponse);
         Assert.assertEquals(totalRequestNum, childResponses.size());
@@ -103,35 +104,4 @@ public class BatchProtocolTestConsumerManagerTest extends BatchProtocolTest {
         }
     }
 
-    @Test
-    public void testUpdateConsumerOffsetBatchProtocol() throws Exception {
-        CommonBatchProcessor commonBatchProcessor = brokerController.getCommonBatchProcessor();
-
-        TopicConfigManager topicConfigManager = brokerController.getTopicConfigManager();
-
-        Map<Integer, RemotingCommand> expectedRequests = new HashMap<>();
-        Long offset = 100L;
-
-        for (int i = 0; i < totalRequestNum; i++) {
-            String topic = topicPrefix + "-" + i;
-            topicConfigManager.getTopicConfigTable().put(topic, new TopicConfig(topic));
-            RemotingCommand childSendRequest = createUpdateConsumerOffsetRequest(consumerGroup, topic, queue, offset);
-            expectedRequests.put(childSendRequest.getOpaque(), childSendRequest);
-        }
-
-        RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(expectedRequests.values()));
-        batchRequest.setRemark(CommonBatchProcessor.DISPATCH_CONSUMER_OFFSET);
-
-        CompletableFuture<RemotingCommand> batchFuture = commonBatchProcessor.asyncProcessRequest(ctx, batchRequest, callback);
-
-        assertThat(batchFuture.isDone()).isTrue();
-        RemotingCommand batchResponse = batchFuture.get();
-        List<RemotingCommand> childResponses = RemotingCommand.parseChildren(batchResponse);
-        Assert.assertEquals(totalRequestNum, childResponses.size());
-
-        for (RemotingCommand actualChildResponse : childResponses) {
-            int opaque = actualChildResponse.getOpaque();
-            assertThat(expectedRequests).containsKey(opaque);
-        }
-    }
 }

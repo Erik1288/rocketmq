@@ -72,7 +72,12 @@ public class CommonMergeBatchResponseStrategyTest {
         allResults.putAll(doneResults);
         allResults.putAll(undoneResults);
 
-        CompletableFuture<RemotingCommand> batchFuture = strategy.merge(batchOpaque, allResults);
+        CompletableFuture<RemotingCommand> batchFuture = null;
+        try {
+            batchFuture = strategy.merge(batchOpaque, allResults);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
         Assert.assertFalse(batchFuture.isDone());
 
         for (Map.Entry<Integer, CompletableFuture<RemotingCommand>> entry : undoneResults.entrySet()) {

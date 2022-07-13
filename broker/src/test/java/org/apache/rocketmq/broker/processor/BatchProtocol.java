@@ -36,7 +36,7 @@ import java.io.UnsupportedEncodingException;
 import java.util.concurrent.CompletableFuture;
 
 @RunWith(MockitoJUnitRunner.class)
-public class BatchProtocolTest {
+public class BatchProtocol {
     protected BrokerController brokerController;
     protected RemotingResponseCallback callback = CompletableFuture::completedFuture;
     @Mock
