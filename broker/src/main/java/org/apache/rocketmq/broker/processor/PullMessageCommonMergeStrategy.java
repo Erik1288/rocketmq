@@ -45,7 +45,7 @@ public class PullMessageCommonMergeStrategy extends MergeBatchResponseStrategy {
     @Override
     public CompletableFuture<RemotingCommand> merge(
             Integer batchOpaque,
-            Map<Integer, CompletableFuture<RemotingCommand>> opaqueToFuture) throws Exception {
+            Map<Integer, CompletableFuture<RemotingCommand>> opaqueToFuture) {
 
         Preconditions.checkNotNull(batchOpaque, "batchOpaque shouldn't be null.");
         Preconditions.checkNotNull(opaqueToFuture, "opaqueToFuture shouldn't be null.");
@@ -79,12 +79,15 @@ public class PullMessageCommonMergeStrategy extends MergeBatchResponseStrategy {
         }
 
         // case 3: none of them is done. waiting until at least one future is done, completes undone futures, then respond to client.
-        completeBatchWhileNoneIsDone(batchOpaque, undoneResults, batchFuture, expectedResponseNum);
+        completeBatchWhileNoneIsDone(batchOpaque, batchFuture, undoneResults, expectedResponseNum);
 
         return batchFuture;
     }
 
-    private void completeBatchWhileNoneIsDone(Integer batchOpaque, Map<Integer, CompletableFuture<RemotingCommand>> undoneResults, CompletableFuture<RemotingCommand> batchFuture, int expectedResponseNum) {
+    private void completeBatchWhileNoneIsDone(
+            Integer batchOpaque,
+            CompletableFuture<RemotingCommand> batchFuture, Map<Integer, CompletableFuture<RemotingCommand>> undoneResults,
+            int expectedResponseNum) {
         AtomicBoolean completeBatch = new AtomicBoolean(false);
 
         undoneResults.forEach((childOpaque, childFuture) -> childFuture.whenComplete((childResp, throwable) -> {

@@ -58,7 +58,7 @@ public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
             ChannelHandlerContext ctx,
             RemotingCommand request,
             RemotingResponseCallback responseCallback) throws Exception {
-        log.debug("receive PullMessage request command, {}", request);
+        log.debug("receive common-batch request command, {}", request);
 
         AsyncNettyRequestProcessor asyncNettyRequestProcessor = dispatchProcessor(request);
         List<RemotingCommand> requestChildren = RemotingCommand.parseChildren(request);
@@ -85,17 +85,17 @@ public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
 
     private AsyncNettyRequestProcessor dispatchProcessor(RemotingCommand batchRequest) {
         // TODO use [remark] for logic dispatching for the time being.
-        String remark = batchRequest.getRemark();
+        String dispatchMark = batchRequest.getRemark();
 
-        if (Objects.equals(DISPATCH_SEND, remark)) {
+        if (Objects.equals(DISPATCH_SEND, dispatchMark)) {
             return this.brokerController.getSendProcessor();
-        } else if (Objects.equals(DISPATCH_PULL, remark)) {
+        } else if (Objects.equals(DISPATCH_PULL, dispatchMark)) {
             return this.brokerController.getPullMessageProcessor();
-        } else if (Objects.equals(DISPATCH_CONSUMER_OFFSET, remark)) {
+        } else if (Objects.equals(DISPATCH_CONSUMER_OFFSET, dispatchMark)) {
             return this.brokerController.getConsumerManageProcessor();
         } else {
-            log.error("processor is not supported for {}.", remark);
-            throw new RuntimeException("processor is not supported yet.");
+            log.error("processor is not supported for [{}].", dispatchMark);
+            throw new RuntimeException("processor is not supported for [" + dispatchMark + "].");
         }
     }
 }

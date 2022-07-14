@@ -44,7 +44,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.class)
-public class BatchProtocolTestConsumerManager extends BatchProtocol {
+public class BatchProtocolConsumerManagerTest extends BatchProtocol {
     private final int totalRequestNum = 20;
     private final Integer queue = 0;
     private final String topicPrefix = "batch-protocol-";

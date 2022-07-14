@@ -64,7 +64,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.class)
-public class BatchProtocolTestPull extends BatchProtocol {
+public class BatchProtocolPullTest extends BatchProtocol {
     private BrokerConfig brokerConfig;
     private List<String> topics = new ArrayList<>();
     private String consumerGroup = "consumer-group";
