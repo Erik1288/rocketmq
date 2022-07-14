@@ -64,7 +64,6 @@ public class BatchProtocolSendTest extends BatchProtocol {
         Channel mockChannel = mock(Channel.class);
         when(mockChannel.remoteAddress()).thenReturn(new InetSocketAddress(1024));
         when(ctx.channel()).thenReturn(mockChannel);
-        when(ctx.channel().isWritable()).thenReturn(true);
 
         // prepare topics
         TopicConfigManager topicConfigManager = brokerController.getTopicConfigManager();
@@ -78,6 +77,7 @@ public class BatchProtocolSendTest extends BatchProtocol {
     @After
     public void after() {
         brokerController.getMessageStore().destroy();
+        brokerController.shutdown();
     }
 
     @Test

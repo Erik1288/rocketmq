@@ -63,13 +63,12 @@ public class BatchProtocolConsumerManagerTest extends BatchProtocol {
         Channel mockChannel = mock(Channel.class);
         when(mockChannel.remoteAddress()).thenReturn(new InetSocketAddress(1024));
         when(ctx.channel()).thenReturn(mockChannel);
-        when(ctx.channel().isWritable()).thenReturn(true);
     }
 
     @After
     public void after() {
-        brokerController.getMessageStore().shutdown();
         brokerController.getMessageStore().destroy();
+        brokerController.shutdown();
     }
 
     @Test

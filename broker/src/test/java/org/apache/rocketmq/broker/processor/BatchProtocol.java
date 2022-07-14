@@ -28,14 +28,13 @@ import org.apache.rocketmq.common.sysflag.PullSysFlag;
 import org.apache.rocketmq.remoting.common.RemotingHelper;
 import org.apache.rocketmq.remoting.netty.RemotingResponseCallback;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
-import org.junit.runner.RunWith;
+import org.apache.rocketmq.store.MessageStore;
 import org.mockito.Mock;
-import org.mockito.junit.MockitoJUnitRunner;
 
 import java.io.UnsupportedEncodingException;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 
-@RunWith(MockitoJUnitRunner.class)
 public class BatchProtocol {
     protected BrokerController brokerController;
     protected RemotingResponseCallback callback = CompletableFuture::completedFuture;
@@ -107,5 +106,9 @@ public class BatchProtocol {
         request.makeCustomHeaderToNet();
         request.setBody(msg.getBody());
         return request;
+    }
+
+    protected Callable<Boolean> fullyDispatched(MessageStore messageStore) {
+        return () -> messageStore.dispatchBehindBytes() == 0;
     }
 }

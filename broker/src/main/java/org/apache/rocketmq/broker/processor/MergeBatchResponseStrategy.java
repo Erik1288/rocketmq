@@ -53,13 +53,16 @@ public abstract class MergeBatchResponseStrategy {
         Preconditions.checkArgument(!responses.isEmpty());
         Preconditions.checkArgument(responses.size() == expectedResponseNum);
 
+        int successCode = SUCCESS;
+        String successRemark = REMARK_SUCCESS;
+
         RemotingCommand sample = responses.get(0);
         boolean zeroCopy = sample.getAttachment() instanceof FileRegion;
         // zero-copy
         if (zeroCopy) {
-            return doMergeZeroCopyChildren(responses, batchOpaque);
+            return doMergeZeroCopyChildren(responses, batchOpaque, successCode, successRemark);
         } else {
-            return doMergeCommonChildren(responses, batchOpaque);
+            return doMergeCommonChildren(responses, batchOpaque, successCode, successRemark);
         }
     }
 
@@ -71,13 +74,15 @@ public abstract class MergeBatchResponseStrategy {
         return childResp;
     }
 
-    private RemotingCommand doMergeCommonChildren(List<RemotingCommand> responses, int batchOpaque) throws RemotingCommandException {
+    private RemotingCommand doMergeCommonChildren(List<RemotingCommand> responses, int batchOpaque, int code, String remark) throws RemotingCommandException {
         RemotingCommand batchResponse = RemotingCommand.mergeChildren(responses);
         batchResponse.setOpaque(batchOpaque);
+        batchResponse.setCode(code);
+        batchResponse.setRemark(remark);
         return batchResponse;
     }
 
-    private RemotingCommand doMergeZeroCopyChildren(List<RemotingCommand> responses, int batchOpaque) {
+    private RemotingCommand doMergeZeroCopyChildren(List<RemotingCommand> responses, int batchOpaque, int code, String remark) {
         List<ManyMessageTransfer> manyMessageTransferList = new ArrayList<>();
 
         int bodyLength = 0;
@@ -90,7 +95,7 @@ public abstract class MergeBatchResponseStrategy {
             }
         }
 
-        RemotingCommand zeroCopyResponse = RemotingCommand.createResponse(batchOpaque, SUCCESS, REMARK_SUCCESS);
+        RemotingCommand zeroCopyResponse = RemotingCommand.createResponse(batchOpaque, code, remark);
 
         ByteBuffer batchHeader = zeroCopyResponse.encodeHeader(bodyLength);
         BatchManyMessageTransfer batchManyMessageTransfer = new BatchManyMessageTransfer(batchHeader, manyMessageTransferList);

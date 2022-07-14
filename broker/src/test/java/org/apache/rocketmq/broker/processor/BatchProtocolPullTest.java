@@ -19,9 +19,10 @@ package org.apache.rocketmq.broker.processor;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
-import io.netty.channel.FileRegion;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.client.ClientChannelInfo;
+import org.apache.rocketmq.broker.pagecache.BatchManyMessageTransfer;
+import org.apache.rocketmq.broker.pagecache.ManyMessageTransfer;
 import org.apache.rocketmq.broker.subscription.SubscriptionGroupManager;
 import org.apache.rocketmq.broker.topic.TopicConfigManager;
 import org.apache.rocketmq.common.BrokerConfig;
@@ -40,6 +41,9 @@ import org.apache.rocketmq.remoting.netty.FileRegionEncoder;
 import org.apache.rocketmq.remoting.netty.NettyClientConfig;
 import org.apache.rocketmq.remoting.netty.NettyServerConfig;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
+import org.apache.rocketmq.store.GetMessageResult;
+import org.apache.rocketmq.store.MappedFile;
+import org.apache.rocketmq.store.SelectMappedBufferResult;
 import org.apache.rocketmq.store.config.MessageStoreConfig;
 import org.junit.After;
 import org.junit.Before;
@@ -47,6 +51,7 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.junit.MockitoJUnitRunner;
 
+import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
@@ -59,7 +64,9 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -77,6 +84,7 @@ public class BatchProtocolPullTest extends BatchProtocol {
     @Before
     public void init() throws Exception {
         this.brokerConfig = new BrokerConfig();
+        this.brokerController = null;
         this.brokerController = new BrokerController(
                 this.brokerConfig,
                 new NettyServerConfig(),
@@ -86,10 +94,10 @@ public class BatchProtocolPullTest extends BatchProtocol {
         brokerController.start();
 
         Channel mockChannel = mock(Channel.class);
-        when(mockChannel.isWritable()).thenReturn(true);
+        // when(mockChannel.isWritable()).thenReturn(true);
         when(mockChannel.remoteAddress()).thenReturn(new InetSocketAddress(1024));
         when(ctx.channel()).thenReturn(mockChannel);
-        when(ctx.channel().isWritable()).thenReturn(true);
+        // when(ctx.channel().isWritable()).thenReturn(true);
         ClientChannelInfo clientChannelInfo = new ClientChannelInfo(mockChannel);
 
         // prepare topics
@@ -120,6 +128,7 @@ public class BatchProtocolPullTest extends BatchProtocol {
     @After
     public void after() {
         brokerController.getMessageStore().destroy();
+        brokerController.shutdown();
     }
 
     @Test
@@ -132,6 +141,7 @@ public class BatchProtocolPullTest extends BatchProtocol {
             RemotingCommand sendResponse = brokerController.getSendProcessor().processRequest(ctx, sendRequest);
             assertThat(sendResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
         }
+        await().atMost(5, SECONDS).until(fullyDispatched(this.brokerController.getMessageStore()));
 
         Map<Integer, RemotingCommand> expectedRequests = new HashMap<>();
 
@@ -178,6 +188,8 @@ public class BatchProtocolPullTest extends BatchProtocol {
             assertThat(sendResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
         }
 
+        await().atMost(5, SECONDS).until(fullyDispatched(this.brokerController.getMessageStore()));
+
         Map<Integer, RemotingCommand> expectedRequests = new HashMap<>();
 
         Long offset = 0L;
@@ -196,8 +208,9 @@ public class BatchProtocolPullTest extends BatchProtocol {
         assertThat(batchFuture.isDone()).isTrue();
         RemotingCommand batchResponse = batchFuture.get();
         assertThat(batchResponse.getAttachment()).isNotNull();
+        assertThat(batchResponse.getAttachment()).isInstanceOf(BatchManyMessageTransfer.class);
 
-        FileRegion fileRegion = (FileRegion) batchResponse.getAttachment();
+        BatchManyMessageTransfer fileRegion = (BatchManyMessageTransfer) batchResponse.getAttachment();
 
         FileRegionEncoder fileRegionEncoder = new FileRegionEncoder();
         ByteBuf batchResponseBuf = Unpooled.buffer((int) fileRegion.count());
@@ -209,6 +222,10 @@ public class BatchProtocolPullTest extends BatchProtocol {
 
         List<RemotingCommand> childResponses = RemotingCommand.parseChildren(decodeBatchResponse);
         assertThat(childResponses).hasSize(totalRequestNum);
+
+        assertMmapExist(fileRegion, true);
+        fileRegion.close();
+        assertMmapExist(fileRegion, false);
 
         for (RemotingCommand actualChildResponse : childResponses) {
             int opaque = actualChildResponse.getOpaque();
@@ -224,7 +241,7 @@ public class BatchProtocolPullTest extends BatchProtocol {
     }
 
     @Test
-    public void testPartialPullLongPollingBatchProtocol() throws Exception {
+    public void testPartialLongPollingBatchProtocol() throws Exception {
         CommonBatchProcessor commonBatchProcessor = brokerController.getCommonBatchProcessor();
 
         Map<Integer, RemotingCommand> childRequests = new HashMap<>();
@@ -244,6 +261,8 @@ public class BatchProtocolPullTest extends BatchProtocol {
             RemotingCommand sendResponse = brokerController.getSendProcessor().processRequest(ctx, sendRequest);
             assertThat(sendResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
         }
+
+        await().atMost(5, SECONDS).until(fullyDispatched(this.brokerController.getMessageStore()));
 
         RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(childRequests.values()));
         batchRequest.setRemark(CommonBatchProcessor.DISPATCH_PULL);
@@ -272,7 +291,7 @@ public class BatchProtocolPullTest extends BatchProtocol {
     }
 
     @Test
-    public void testPullLongPollingBatchProtocol() throws Exception {
+    public void testAllLongPollingBatchProtocol() throws Exception {
         CommonBatchProcessor commonBatchProcessor = brokerController.getCommonBatchProcessor();
 
         Map<Integer, RemotingCommand> childRequests = new HashMap<>();
@@ -339,5 +358,32 @@ public class BatchProtocolPullTest extends BatchProtocol {
 
         consumerData.setSubscriptionDataSet(subscriptionDataSet);
         return consumerData;
+    }
+
+    private void assertMmapExist(BatchManyMessageTransfer fileRegion, boolean expectHasMmap) throws NoSuchFieldException, IllegalAccessException {
+        Field manyMessageTransferListField = BatchManyMessageTransfer.class.getDeclaredField("manyMessageTransferList");
+        manyMessageTransferListField.setAccessible(true);
+
+        boolean hasMmap = hasMmap(fileRegion, manyMessageTransferListField);
+
+        assertThat(hasMmap).isEqualTo(expectHasMmap);
+    }
+
+    private boolean hasMmap(BatchManyMessageTransfer fileRegion, Field manyMessageTransferListField) throws IllegalAccessException, NoSuchFieldException {
+        List<ManyMessageTransfer> manyMessageTransferList = (List<ManyMessageTransfer>) manyMessageTransferListField.get(fileRegion);
+        for (ManyMessageTransfer manyMessageTransfer : manyMessageTransferList) {
+            Field getMessageResultField = ManyMessageTransfer.class.getDeclaredField("getMessageResult");
+            getMessageResultField.setAccessible(true);
+            GetMessageResult getMessageResult = (GetMessageResult) getMessageResultField.get(manyMessageTransfer);
+            for (SelectMappedBufferResult selectMappedBufferResult : getMessageResult.getMessageMapedList()) {
+                Field mappedFileField = SelectMappedBufferResult.class.getDeclaredField("mappedFile");
+                mappedFileField.setAccessible(true);
+                MappedFile mappedFile = (MappedFile) mappedFileField.get(selectMappedBufferResult);
+                if (mappedFile != null) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 }
