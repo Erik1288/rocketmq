@@ -138,7 +138,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
         if (!PermName.isReadable(this.brokerController.getBrokerConfig().getBrokerPermission())) {
             response.setCode(ResponseCode.NO_PERMISSION);
             response.setRemark(String.format("the broker[%s] pulling message is forbidden", this.brokerController.getBrokerConfig().getBrokerIP1()));
-            return CompletableFuture.completedFuture(request);
+            return CompletableFuture.completedFuture(response);
         }
 
         SubscriptionGroupConfig subscriptionGroupConfig =
@@ -146,13 +146,13 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
         if (null == subscriptionGroupConfig) {
             response.setCode(ResponseCode.SUBSCRIPTION_GROUP_NOT_EXIST);
             response.setRemark(String.format("subscription group [%s] does not exist, %s", requestHeader.getConsumerGroup(), FAQUrl.suggestTodo(FAQUrl.SUBSCRIPTION_GROUP_NOT_EXIST)));
-            return CompletableFuture.completedFuture(request);
+            return CompletableFuture.completedFuture(response);
         }
 
         if (!subscriptionGroupConfig.isConsumeEnable()) {
             response.setCode(ResponseCode.NO_PERMISSION);
             response.setRemark("subscription group no permission, " + requestHeader.getConsumerGroup());
-            return CompletableFuture.completedFuture(request);
+            return CompletableFuture.completedFuture(response);
         }
 
         final boolean hasSuspendFlag = PullSysFlag.hasSuspendFlag(requestHeader.getSysFlag());
@@ -166,13 +166,13 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
             log.error("the topic {} not exist, consumer: {}", requestHeader.getTopic(), remoteAddressSupplier.channelRemoteAddr());
             response.setCode(ResponseCode.TOPIC_NOT_EXIST);
             response.setRemark(String.format("topic[%s] not exist, apply first please! %s", requestHeader.getTopic(), FAQUrl.suggestTodo(FAQUrl.APPLY_TOPIC_URL)));
-            return CompletableFuture.completedFuture(request);
+            return CompletableFuture.completedFuture(response);
         }
 
         if (!PermName.isReadable(topicConfig.getPerm())) {
             response.setCode(ResponseCode.NO_PERMISSION);
             response.setRemark("the topic[" + requestHeader.getTopic() + "] pulling message is forbidden");
-            return CompletableFuture.completedFuture(request);
+            return CompletableFuture.completedFuture(response);
         }
 
         if (requestHeader.getQueueId() < 0 || requestHeader.getQueueId() >= topicConfig.getReadQueueNums()) {
@@ -181,7 +181,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
             log.warn(errorInfo);
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark(errorInfo);
-            return CompletableFuture.completedFuture(request);
+            return CompletableFuture.completedFuture(response);
         }
 
         SubscriptionData subscriptionData = null;
@@ -203,7 +203,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                     requestHeader.getConsumerGroup());
                 response.setCode(ResponseCode.SUBSCRIPTION_PARSE_FAILED);
                 response.setRemark("parse the consumer's subscription failed");
-                return CompletableFuture.completedFuture(request);
+                return CompletableFuture.completedFuture(response);
             }
         } else {
             ConsumerGroupInfo consumerGroupInfo =
@@ -212,14 +212,14 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                 log.warn("the consumer's group info not exist, group: {}", requestHeader.getConsumerGroup());
                 response.setCode(ResponseCode.SUBSCRIPTION_NOT_EXIST);
                 response.setRemark("the consumer's group info not exist" + FAQUrl.suggestTodo(FAQUrl.SAME_GROUP_DIFFERENT_TOPIC));
-                return CompletableFuture.completedFuture(request);
+                return CompletableFuture.completedFuture(response);
             }
 
             if (!subscriptionGroupConfig.isConsumeBroadcastEnable()
                 && consumerGroupInfo.getMessageModel() == MessageModel.BROADCASTING) {
                 response.setCode(ResponseCode.NO_PERMISSION);
                 response.setRemark("the consumer group[" + requestHeader.getConsumerGroup() + "] can not consume by broadcast way");
-                return CompletableFuture.completedFuture(request);
+                return CompletableFuture.completedFuture(response);
             }
 
             subscriptionData = consumerGroupInfo.findSubscriptionData(requestHeader.getTopic());
@@ -227,7 +227,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                 log.warn("the consumer's subscription not exist, group: {}, topic:{}", requestHeader.getConsumerGroup(), requestHeader.getTopic());
                 response.setCode(ResponseCode.SUBSCRIPTION_NOT_EXIST);
                 response.setRemark("the consumer's subscription not exist" + FAQUrl.suggestTodo(FAQUrl.SAME_GROUP_DIFFERENT_TOPIC));
-                return CompletableFuture.completedFuture(request);
+                return CompletableFuture.completedFuture(response);
             }
 
             if (subscriptionData.getSubVersion() < requestHeader.getSubVersion()) {
@@ -235,7 +235,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                     subscriptionData.getSubString());
                 response.setCode(ResponseCode.SUBSCRIPTION_NOT_LATEST);
                 response.setRemark("the consumer's subscription not latest");
-                return CompletableFuture.completedFuture(request);
+                return CompletableFuture.completedFuture(response);
             }
             if (!ExpressionType.isTagType(subscriptionData.getExpressionType())) {
                 consumerFilterData = this.brokerController.getConsumerFilterManager().get(requestHeader.getTopic(),
@@ -243,14 +243,14 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                 if (consumerFilterData == null) {
                     response.setCode(ResponseCode.FILTER_DATA_NOT_EXIST);
                     response.setRemark("The broker's consumer filter data is not exist!Your expression may be wrong!");
-                    return CompletableFuture.completedFuture(request);
+                    return CompletableFuture.completedFuture(response);
                 }
                 if (consumerFilterData.getClientVersion() < requestHeader.getSubVersion()) {
                     log.warn("The broker's consumer filter data is not latest, group: {}, topic: {}, serverV: {}, clientV: {}",
                         requestHeader.getConsumerGroup(), requestHeader.getTopic(), consumerFilterData.getClientVersion(), requestHeader.getSubVersion());
                     response.setCode(ResponseCode.FILTER_DATA_NOT_LATEST);
                     response.setRemark("the consumer's consumer filter data not latest");
-                    return CompletableFuture.completedFuture(request);
+                    return CompletableFuture.completedFuture(response);
                 }
             }
         }
@@ -259,7 +259,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
             && !this.brokerController.getBrokerConfig().isEnablePropertyFilter()) {
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark("The broker does not support consumer to filter message by " + subscriptionData.getExpressionType());
-            return CompletableFuture.completedFuture(request);
+            return CompletableFuture.completedFuture(response);
         }
 
         MessageFilter messageFilter;
