@@ -73,13 +73,13 @@ import static org.mockito.Mockito.when;
 @RunWith(MockitoJUnitRunner.class)
 public class BatchProtocolPullTest extends BatchProtocol {
     private BrokerConfig brokerConfig;
-    private List<String> topics = new ArrayList<>();
-    private String consumerGroup = "consumer-group";
-    private String producerGroup = "producer-group";
-    private int totalRequestNum = 20;
-    private Integer queue = 0;
-    private String topicPrefix = "batch-protocol-";
-    private Random random = new Random();
+    private final List<String> topics = new ArrayList<>();
+    private final String consumerGroup = "consumer-group";
+    private final String producerGroup = "producer-group";
+    private final int totalRequestNum = 20;
+    private final Integer queue = 0;
+    private final String topicPrefix = "batch-protocol-";
+    private final Random random = new Random();
 
     @Before
     public void init() throws Exception {
@@ -224,7 +224,9 @@ public class BatchProtocolPullTest extends BatchProtocol {
         assertThat(childResponses).hasSize(totalRequestNum);
 
         assertMmapExist(fileRegion, true);
-        fileRegion.close();
+        assertThat(batchResponse.getFinallyCallback()).isNotNull();
+        // release mmap
+        batchResponse.getFinallyCallback().run();
         assertMmapExist(fileRegion, false);
 
         for (RemotingCommand actualChildResponse : childResponses) {
@@ -319,7 +321,7 @@ public class BatchProtocolPullTest extends BatchProtocol {
         RemotingCommand sendResponse = brokerController.getSendProcessor().processRequest(ctx, sendRequest);
         assertThat(sendResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
 
-        Thread.sleep(1000);
+        await().atMost(5, SECONDS).until(fullyDispatched(this.brokerController.getMessageStore()));
         assertThat(batchFuture.isDone()).isTrue();
 
         RemotingCommand batchResponse = batchFuture.get();
