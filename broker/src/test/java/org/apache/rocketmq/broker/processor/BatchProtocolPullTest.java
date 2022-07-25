@@ -295,6 +295,71 @@ public class BatchProtocolPullTest extends BatchProtocol {
     }
 
     @Test
+    public void testPullPartialZeroCopyBatchProtocol() throws Exception {
+        CommonBatchProcessor commonBatchProcessor = brokerController.getCommonBatchProcessor();
+
+        Map<Integer, RemotingCommand> childRequests = new HashMap<>();
+
+        // make sure [longPollingTopic] won't get message.
+        Long offset = 0L;
+        Integer longPollingOpaque = null;
+        for (String topic : topics) {
+            RemotingCommand childPullRequest = createPullRequest(consumerGroup, topic, queue, offset);
+            childRequests.put(childPullRequest.getOpaque(), childPullRequest);
+
+            if (topic.endsWith("16")) {
+                longPollingOpaque = childPullRequest.getOpaque();
+                continue;
+            }
+            RemotingCommand sendRequest = createSendRequest(producerGroup, topic, queue);
+            RemotingCommand sendResponse = brokerController.getSendProcessor().processRequest(ctx, sendRequest);
+            assertThat(sendResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
+        }
+
+        await().atMost(5, SECONDS).until(fullyDispatched(this.brokerController.getMessageStore()));
+
+        RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(childRequests.values()));
+        makeHeader(batchRequest, RequestCode.PULL_MESSAGE);
+
+        // turn [zero-copy] on
+        this.brokerConfig.setTransferMsgByHeap(false);
+        CompletableFuture<RemotingCommand> batchFuture = commonBatchProcessor.asyncProcessRequest(ctx, batchRequest, callback);
+
+        assertThat(batchFuture.isDone()).isTrue();
+        RemotingCommand batchResponse = batchFuture.get();
+        assertThat(batchResponse.getAttachment()).isNotNull();
+        assertThat(batchResponse.getAttachment()).isInstanceOf(BatchManyMessageTransfer.class);
+
+        BatchManyMessageTransfer fileRegion = (BatchManyMessageTransfer) batchResponse.getAttachment();
+
+        FileRegionEncoder fileRegionEncoder = new FileRegionEncoder();
+        ByteBuf batchResponseBuf = Unpooled.buffer((int) fileRegion.count());
+
+        fileRegionEncoder.encode(null, fileRegion, batchResponseBuf);
+
+        // strip 4 bytes to simulate NettyDecoder.
+        batchResponseBuf.readerIndex(4);
+        RemotingCommand decodeBatchResponse = RemotingCommand.decode(batchResponseBuf);
+
+        List<RemotingCommand> childResponses = RemotingCommand.parseChildren(decodeBatchResponse);
+        assertThat(childResponses).hasSize(totalRequestNum - 1);
+
+        assertMmapExist(fileRegion, true);
+        assertThat(batchResponse.getFinallyReleasingCallback()).isNotNull();
+        // release mmap
+        batchResponse.getFinallyReleasingCallback().run();
+        assertMmapExist(fileRegion, false);
+
+        // assertion on responses.
+        for (RemotingCommand actualChildResponse : childResponses) {
+            int opaque = actualChildResponse.getOpaque();
+            assertThat(childRequests).containsKey(opaque);
+            assertThat(opaque).isNotEqualTo(longPollingOpaque);
+            assertThat(actualChildResponse.getCode()).isEqualTo(ResponseCode.SUCCESS);
+        }
+    }
+
+    @Test
     public void testAllLongPollingBatchProtocol() throws Exception {
         CommonBatchProcessor commonBatchProcessor = brokerController.getCommonBatchProcessor();
 

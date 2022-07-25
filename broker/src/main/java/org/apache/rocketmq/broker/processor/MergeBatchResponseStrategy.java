@@ -17,16 +17,12 @@
 package org.apache.rocketmq.broker.processor;
 
 import com.google.common.base.Preconditions;
-import io.netty.channel.FileRegion;
-import org.apache.rocketmq.broker.pagecache.BatchManyMessageTransfer;
-import org.apache.rocketmq.broker.pagecache.ManyMessageTransfer;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
-import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -59,17 +55,11 @@ public abstract class MergeBatchResponseStrategy {
         Preconditions.checkArgument(!responses.isEmpty());
         Preconditions.checkArgument(responses.size() == expectedResponseNum);
 
-        int successCode = SUCCESS;
-        String successRemark = REMARK_SUCCESS;
-
-        RemotingCommand sample = responses.get(0);
-        boolean zeroCopy = sample.getAttachment() instanceof FileRegion;
-        // zero-copy
-        if (zeroCopy) {
-            return doMergeZeroCopyChildren(responses, batchOpaque, successCode, successRemark);
-        } else {
-            return doMergeCommonChildren(responses, batchOpaque, successCode, successRemark);
-        }
+        RemotingCommand batchResponse = RemotingCommand.mergeChildren(responses);
+        batchResponse.setOpaque(batchOpaque);
+        batchResponse.setCode(SUCCESS);
+        batchResponse.setRemark(REMARK_SUCCESS);
+        return batchResponse;
     }
 
     protected RemotingCommand nonNullableResponse(Integer childOpaque, RemotingCommand childResp) {
@@ -90,54 +80,16 @@ public abstract class MergeBatchResponseStrategy {
             return ;
         }
 
+        if (batchFuture.isDone()) {
+            return ;
+        }
+
         try {
-            doCompleteBatchFuture(batchFuture, responses, expectedResponseNum, batchOpaque);
+            batchFuture.complete(mergeChildren(new ArrayList<>(responses.values()), expectedResponseNum, batchOpaque));
         } catch (Exception e) {
             log.error("completeBatchFuture failed. batch: {}, child: {}.", batchOpaque, childOpaque, e);
             batchFuture.complete(RemotingCommand.createResponse(batchOpaque, SYSTEM_ERROR, REMARK_SYSTEM_ERROR));
         }
     }
 
-    private void doCompleteBatchFuture(
-            CompletableFuture<RemotingCommand> batchFuture,
-            ConcurrentMap<Integer, RemotingCommand> responses,
-            int expectedResponseNum,
-            int batchOpaque) throws RemotingCommandException {
-        batchFuture.complete(mergeChildren(new ArrayList<>(responses.values()), expectedResponseNum, batchOpaque));
-    }
-
-    private RemotingCommand doMergeCommonChildren(List<RemotingCommand> responses, int batchOpaque, int code, String remark) throws RemotingCommandException {
-        RemotingCommand batchResponse = RemotingCommand.mergeChildren(responses);
-        batchResponse.setOpaque(batchOpaque);
-        batchResponse.setCode(code);
-        batchResponse.setRemark(remark);
-        return batchResponse;
-    }
-
-    private RemotingCommand doMergeZeroCopyChildren(List<RemotingCommand> responses, int batchOpaque, int code, String remark) {
-        List<ManyMessageTransfer> manyMessageTransferList = new ArrayList<>();
-
-        int bodyLength = 0;
-        for (RemotingCommand resp : responses) {
-            // TODO memory leak.
-            if (resp.getAttachment() == null) {
-                throw new RuntimeException("ZeroCopy inconsistency in a batch.");
-            }
-
-            ManyMessageTransfer manyMessageTransfer = (ManyMessageTransfer) resp.getAttachment();
-            manyMessageTransferList.add(manyMessageTransfer);
-
-            bodyLength += manyMessageTransfer.count();
-        }
-
-        RemotingCommand zeroCopyResponse = RemotingCommand.createResponse(batchOpaque, code, remark);
-
-        ByteBuffer batchHeader = zeroCopyResponse.encodeHeader(bodyLength);
-        BatchManyMessageTransfer batchManyMessageTransfer = new BatchManyMessageTransfer(batchHeader, manyMessageTransferList);
-
-        Runnable releaseBatch = batchManyMessageTransfer::close;
-        zeroCopyResponse.setAttachment(batchManyMessageTransfer);
-        zeroCopyResponse.setFinallyReleasingCallback(releaseBatch);
-        return zeroCopyResponse;
-    }
 }

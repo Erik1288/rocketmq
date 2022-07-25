@@ -17,11 +17,18 @@
 package org.apache.rocketmq.broker.processor;
 
 import com.google.common.base.Preconditions;
+import io.netty.channel.FileRegion;
+import org.apache.rocketmq.broker.pagecache.BatchManyMessageTransfer;
+import org.apache.rocketmq.broker.pagecache.ManyMessageTransfer;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
+import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,6 +36,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.rocketmq.common.protocol.ResponseCode.PULL_NOT_FOUND;
+import static org.apache.rocketmq.remoting.protocol.RemotingSysResponseCode.SUCCESS;
 
 public class PullMessageCommonMergeStrategy extends MergeBatchResponseStrategy {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
@@ -64,7 +72,7 @@ public class PullMessageCommonMergeStrategy extends MergeBatchResponseStrategy {
                         undoneResults.put(cOpaque, cFuture);
                     }
                 });
-                completeUnRespondedResults(undoneResults);
+                completeUndoneResults(undoneResults);
             } else {
                 doneResults.put(childOpaque, nonNullableResponse(childOpaque, childResp));
             }
@@ -73,6 +81,52 @@ public class PullMessageCommonMergeStrategy extends MergeBatchResponseStrategy {
         }));
 
         return batchFuture;
+    }
+
+    @Override
+    protected RemotingCommand mergeChildren(List<RemotingCommand> responses, int expectedResponseNum, int batchOpaque) throws RemotingCommandException {
+        if (zeroCopy(responses)) {
+            return this.mergeZeroCopyChildren(responses, batchOpaque);
+        } else {
+            return super.mergeChildren(responses, expectedResponseNum, batchOpaque);
+        }
+    }
+
+    private boolean zeroCopy(List<RemotingCommand> responses) {
+        List<RemotingCommand> withAttachment = new ArrayList<>();
+        List<RemotingCommand> withoutAttachment = new ArrayList<>();
+        List<RemotingCommand> withoutAttachmentHavingNoData = new ArrayList<>();
+
+        for (RemotingCommand response : responses) {
+            if (response.getAttachment() instanceof FileRegion) {
+                withAttachment.add(response);
+            } else {
+                withoutAttachment.add(response);
+                if (response.getCode() == PULL_NOT_FOUND) {
+                    withoutAttachmentHavingNoData.add(response);
+                }
+            }
+        }
+
+        if (withoutAttachment.size() == responses.size()) {
+            return false;
+        }
+
+        if (withAttachment.size() == responses.size()) {
+            return true;
+        }
+
+        // zero copy + partial long-polling
+        if (!withAttachment.isEmpty() && withoutAttachmentHavingNoData.size() == withoutAttachment.size()) {
+            return true;
+        } else {
+            withAttachment.forEach(remotingCommand -> {
+                if (remotingCommand.getFinallyReleasingCallback() != null) {
+                    remotingCommand.getFinallyReleasingCallback().run();
+                }
+            });
+            throw new RuntimeException("inconsistency config: transfer by heap.");
+        }
     }
 
     private RemotingCommand extractResult(Integer batchOpaque, Integer childOpaque, CompletableFuture<RemotingCommand> future) {
@@ -84,37 +138,62 @@ public class PullMessageCommonMergeStrategy extends MergeBatchResponseStrategy {
         }
     }
 
-    private void completeUnRespondedResults(Map<Integer, CompletableFuture<RemotingCommand>> unRespondedResults) {
-        if (unRespondedResults.isEmpty()) {
+    private void completeUndoneResults(Map<Integer, CompletableFuture<RemotingCommand>> undoneResults) {
+        if (undoneResults.isEmpty()) {
             return ;
         }
-        unRespondedResults.forEach(this::completeUnRespondedResult);
+        undoneResults.forEach(this::completeUndoneResult);
     }
 
-    private void completeUnRespondedResult(Integer opaque, CompletableFuture<RemotingCommand> unRespondedResult) {
+    private void completeUndoneResult(Integer opaque, CompletableFuture<RemotingCommand> undoneResult) {
         // complete it with a PULL_NOT_FOUND value.
-        boolean triggered = unRespondedResult.complete(RemotingCommand.createResponse(opaque, PULL_NOT_FOUND, REMARK_PULL_NOT_FOUND));
+        boolean triggered = undoneResult.complete(RemotingCommand.createResponse(opaque, PULL_NOT_FOUND, REMARK_PULL_NOT_FOUND));
         if (!triggered) {
             try {
-                assert unRespondedResult.isDone();
-                RemotingCommand response = unRespondedResult.get();
+                assert undoneResult.isDone();
+                RemotingCommand response = undoneResult.get();
                 if (response != null && response.getFinallyReleasingCallback() != null) {
                     response.getFinallyReleasingCallback().run();
                 }
             } catch (InterruptedException | ExecutionException e) {
                 log.error("completeUnRespondedResult failed.", e);
-                throw new RuntimeException("completeUnRespondedResult failed.", e);
+                throw new RuntimeException("completeUndoneResult failed.", e);
             } finally {
                 try {
-                    RemotingCommand response = unRespondedResult.get();
+                    RemotingCommand response = undoneResult.get();
                     if (response != null && response.getFinallyReleasingCallback() != null) {
                         response.getFinallyReleasingCallback().run();
                     }
                 } catch (ExecutionException | InterruptedException e) {
-                    log.error("completeUnRespondedResult failed.", e);
+                    log.error("completeUndoneResult failed.", e);
                 }
             }
         }
+    }
+
+    private RemotingCommand mergeZeroCopyChildren(List<RemotingCommand> responses, int batchOpaque) {
+        List<ManyMessageTransfer> manyMessageTransferList = new ArrayList<>();
+
+        int bodyLength = 0;
+        for (RemotingCommand resp : responses) {
+            if (resp.getAttachment() == null) {
+                // responses whose attachment is null are allowed to be omitted from broker
+                continue;
+            }
+            ManyMessageTransfer manyMessageTransfer = (ManyMessageTransfer) resp.getAttachment();
+            manyMessageTransferList.add(manyMessageTransfer);
+
+            bodyLength += manyMessageTransfer.count();
+        }
+        RemotingCommand zeroCopyResponse = RemotingCommand.createResponse(batchOpaque, SUCCESS, REMARK_SUCCESS);
+
+        ByteBuffer batchHeader = zeroCopyResponse.encodeHeader(bodyLength);
+        BatchManyMessageTransfer batchManyMessageTransfer = new BatchManyMessageTransfer(batchHeader, manyMessageTransferList);
+
+        Runnable releaseBatch = batchManyMessageTransfer::close;
+        zeroCopyResponse.setAttachment(batchManyMessageTransfer);
+        zeroCopyResponse.setFinallyReleasingCallback(releaseBatch);
+        return zeroCopyResponse;
     }
 
     public static PullMessageCommonMergeStrategy getInstance() {
