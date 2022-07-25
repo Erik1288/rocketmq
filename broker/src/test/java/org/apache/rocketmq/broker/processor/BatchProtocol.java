@@ -20,6 +20,7 @@ import io.netty.channel.ChannelHandlerContext;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.common.message.Message;
 import org.apache.rocketmq.common.protocol.RequestCode;
+import org.apache.rocketmq.common.protocol.header.CommonBatchRequestHeader;
 import org.apache.rocketmq.common.protocol.header.PullMessageRequestHeader;
 import org.apache.rocketmq.common.protocol.header.QueryConsumerOffsetRequestHeader;
 import org.apache.rocketmq.common.protocol.header.SendMessageRequestHeader;
@@ -106,6 +107,13 @@ public class BatchProtocol {
         request.makeCustomHeaderToNet();
         request.setBody(msg.getBody());
         return request;
+    }
+
+    protected void makeHeader(RemotingCommand batchRequest, int dispatchCode) {
+        CommonBatchRequestHeader requestHeader = new CommonBatchRequestHeader();
+        requestHeader.setCode(dispatchCode);
+        batchRequest.setHeader(RequestCode.COMMON_BATCH_REQUEST, requestHeader);
+        batchRequest.makeCustomHeaderToNet();
     }
 
     protected Callable<Boolean> fullyDispatched(MessageStore messageStore) {

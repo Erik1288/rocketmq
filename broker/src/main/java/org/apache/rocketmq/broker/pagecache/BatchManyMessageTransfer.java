@@ -22,7 +22,9 @@ import io.netty.util.AbstractReferenceCounted;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Zero copy response for Batch-Protocol.
@@ -52,7 +54,9 @@ public class BatchManyMessageTransfer extends AbstractReferenceCounted implement
     private final ByteBuffer batchHeader;
     // batch-body
     private final List<ManyMessageTransfer> manyMessageTransferList;
-    private long transferred = 0;
+
+    private long headerTransferred = 0;
+    private Map<ManyMessageTransfer, Long> bodyTransferred = new HashMap<>();
 
     public BatchManyMessageTransfer(ByteBuffer batchHeader, List<ManyMessageTransfer> manyMessageTransferList) {
         this.batchHeader = batchHeader;
@@ -69,12 +73,12 @@ public class BatchManyMessageTransfer extends AbstractReferenceCounted implement
 
     @Override
     public long transfered() {
-        return transferred;
+        return headerTransferred + this.bodyTransferred.values().stream().mapToLong(x -> x).sum();
     }
 
     @Override
     public long transferred() {
-        return transferred;
+        return headerTransferred + this.bodyTransferred.values().stream().mapToLong(x -> x).sum();
     }
 
     @Override
@@ -87,17 +91,21 @@ public class BatchManyMessageTransfer extends AbstractReferenceCounted implement
 
     @Override
     public long transferTo(WritableByteChannel target, long position) throws IOException {
-        // batch-header
         if (this.batchHeader.hasRemaining()) {
-            transferred += target.write(this.batchHeader);
-        }
-        // batch-body
-        for (ManyMessageTransfer manyMessageTransfer : manyMessageTransferList) {
-            while (!manyMessageTransfer.isComplete()) {
-                transferred += manyMessageTransfer.transferTo(target, position);
+            // batch-header
+            headerTransferred += target.write(this.batchHeader);
+            return headerTransferred;
+        } else {
+            // batch-body
+            for (ManyMessageTransfer manyMessageTransfer : manyMessageTransferList) {
+                if (!manyMessageTransfer.isComplete()) {
+                    this.bodyTransferred.put(manyMessageTransfer, manyMessageTransfer.transferTo(target, position));
+                    return headerTransferred + this.bodyTransferred.values().stream().mapToLong(x -> x).sum();
+                }
             }
         }
-        return transferred;
+
+        return 0;
     }
 
     @Override

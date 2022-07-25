@@ -30,6 +30,7 @@ import org.apache.rocketmq.common.TopicConfig;
 import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
 import org.apache.rocketmq.common.message.MessageDecoder;
 import org.apache.rocketmq.common.message.MessageExt;
+import org.apache.rocketmq.common.protocol.RequestCode;
 import org.apache.rocketmq.common.protocol.ResponseCode;
 import org.apache.rocketmq.common.protocol.header.PullMessageResponseHeader;
 import org.apache.rocketmq.common.protocol.heartbeat.ConsumeType;
@@ -152,7 +153,7 @@ public class BatchProtocolPullTest extends BatchProtocol {
         }
 
         RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(expectedRequests.values()));
-        batchRequest.setRemark(CommonBatchProcessor.DISPATCH_PULL);
+        makeHeader(batchRequest, RequestCode.PULL_MESSAGE);
 
         // turn [zero-copy] off
         this.brokerConfig.setTransferMsgByHeap(true);
@@ -199,7 +200,7 @@ public class BatchProtocolPullTest extends BatchProtocol {
         }
 
         RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(expectedRequests.values()));
-        batchRequest.setRemark(CommonBatchProcessor.DISPATCH_PULL);
+        makeHeader(batchRequest, RequestCode.PULL_MESSAGE);
 
         // turn [zero-copy] on
         this.brokerConfig.setTransferMsgByHeap(false);
@@ -214,6 +215,7 @@ public class BatchProtocolPullTest extends BatchProtocol {
 
         FileRegionEncoder fileRegionEncoder = new FileRegionEncoder();
         ByteBuf batchResponseBuf = Unpooled.buffer((int) fileRegion.count());
+
         fileRegionEncoder.encode(null, fileRegion, batchResponseBuf);
 
         // strip 4 bytes to simulate NettyDecoder.
@@ -224,9 +226,9 @@ public class BatchProtocolPullTest extends BatchProtocol {
         assertThat(childResponses).hasSize(totalRequestNum);
 
         assertMmapExist(fileRegion, true);
-        assertThat(batchResponse.getFinallyCallback()).isNotNull();
+        assertThat(batchResponse.getFinallyReleasingCallback()).isNotNull();
         // release mmap
-        batchResponse.getFinallyCallback().run();
+        batchResponse.getFinallyReleasingCallback().run();
         assertMmapExist(fileRegion, false);
 
         for (RemotingCommand actualChildResponse : childResponses) {
@@ -267,7 +269,7 @@ public class BatchProtocolPullTest extends BatchProtocol {
         await().atMost(5, SECONDS).until(fullyDispatched(this.brokerController.getMessageStore()));
 
         RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(childRequests.values()));
-        batchRequest.setRemark(CommonBatchProcessor.DISPATCH_PULL);
+        makeHeader(batchRequest, RequestCode.PULL_MESSAGE);
 
         // turn [zero-copy] off
         this.brokerConfig.setTransferMsgByHeap(true);
@@ -307,7 +309,7 @@ public class BatchProtocolPullTest extends BatchProtocol {
         }
 
         RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(childRequests.values()));
-        batchRequest.setRemark(CommonBatchProcessor.DISPATCH_PULL);
+        makeHeader(batchRequest, RequestCode.PULL_MESSAGE);
 
         // turn [zero-copy] off
         this.brokerConfig.setTransferMsgByHeap(true);

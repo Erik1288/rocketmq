@@ -23,11 +23,9 @@ import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
-import java.util.function.Consumer;
 
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.client.ConsumerGroupInfo;
-import org.apache.rocketmq.broker.client.RemoteAddressSupplier;
 import org.apache.rocketmq.broker.filter.ConsumerFilterData;
 import org.apache.rocketmq.broker.filter.ConsumerFilterManager;
 import org.apache.rocketmq.broker.filter.ExpressionForRetryMessageFilter;
@@ -88,16 +86,14 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
     @Override
     public RemotingCommand processRequest(final ChannelHandlerContext ctx,
         RemotingCommand request) throws RemotingCommandException {
-        RemoteAddressSupplier remoteAddressSupplier = new RemoteAddressSupplier(ctx.channel());
-        Consumer<RemotingCommand> fastFailCallback = ctx.channel()::writeAndFlush;
-        return syncPullMessage(request, remoteAddressSupplier, fastFailCallback);
+        WrappedChannelHandlerContext wrappedCtx = new WrappedChannelHandlerContext(ctx);
+        return syncPullMessage(request, wrappedCtx);
     }
 
     public CompletableFuture<RemotingCommand> asyncProcessRequest(ChannelHandlerContext ctx,
                                                                   RemotingCommand request) throws RemotingCommandException {
-        RemoteAddressSupplier remoteAddressSupplier = new RemoteAddressSupplier(ctx.channel());
-        Consumer<RemotingCommand> fastFailRunnable = ctx.channel()::writeAndFlush;
-        return asyncPullMessage(request, true, remoteAddressSupplier, fastFailRunnable);
+        WrappedChannelHandlerContext wrappedCtx = new WrappedChannelHandlerContext(ctx);
+        return asyncPullMessage(request, true, wrappedCtx);
     }
 
     @Override
@@ -107,11 +103,10 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
 
     public RemotingCommand syncPullMessage(
             RemotingCommand request,
-            RemoteAddressSupplier remoteAddressSupplier,
-            Consumer<RemotingCommand> fastFailCallback) throws RemotingCommandException {
+            WrappedChannelHandlerContext wrappedCtx) throws RemotingCommandException {
         RemotingCommand response = null;
         try {
-            CompletableFuture<RemotingCommand> future = asyncPullMessage(request, false, remoteAddressSupplier, fastFailCallback);
+            CompletableFuture<RemotingCommand> future = asyncPullMessage(request, false, wrappedCtx);
             assert future.isDone();
             response = future.get();
         } catch (InterruptedException | ExecutionException e) {
@@ -123,8 +118,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
     public CompletableFuture<RemotingCommand> asyncPullMessage(
             RemotingCommand request,
             boolean brokerAllowSuspend,
-            RemoteAddressSupplier remoteAddressSupplier,
-            Consumer<RemotingCommand> fastFailCallback) throws RemotingCommandException {
+            WrappedChannelHandlerContext wrappedCtx) throws RemotingCommandException {
         final long beginTimeMills = this.brokerController.getMessageStore().now();
         final RemotingCommand response = RemotingCommand.createResponseCommand(PullMessageResponseHeader.class);
         final PullMessageResponseHeader responseHeader = (PullMessageResponseHeader) response.readCustomHeader();
@@ -163,7 +157,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
 
         TopicConfig topicConfig = this.brokerController.getTopicConfigManager().selectTopicConfig(requestHeader.getTopic());
         if (null == topicConfig) {
-            log.error("the topic {} not exist, consumer: {}", requestHeader.getTopic(), remoteAddressSupplier.channelRemoteAddr());
+            log.error("the topic {} not exist, consumer: {}", requestHeader.getTopic(), wrappedCtx.channelRemoteAddr());
             response.setCode(ResponseCode.TOPIC_NOT_EXIST);
             response.setRemark(String.format("topic[%s] not exist, apply first please! %s", requestHeader.getTopic(), FAQUrl.suggestTodo(FAQUrl.APPLY_TOPIC_URL)));
             return CompletableFuture.completedFuture(response);
@@ -177,7 +171,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
 
         if (requestHeader.getQueueId() < 0 || requestHeader.getQueueId() >= topicConfig.getReadQueueNums()) {
             String errorInfo = String.format("queueId[%d] is illegal, topic:[%s] topicConfig.readQueueNums:[%d] consumer:[%s]",
-                requestHeader.getQueueId(), requestHeader.getTopic(), topicConfig.getReadQueueNums(), remoteAddressSupplier.remoteAddress());
+                requestHeader.getQueueId(), requestHeader.getTopic(), topicConfig.getReadQueueNums(), wrappedCtx.remoteAddress());
             log.warn(errorInfo);
             response.setCode(ResponseCode.SYSTEM_ERROR);
             response.setRemark(errorInfo);
@@ -345,7 +339,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                     response.setCode(ResponseCode.PULL_OFFSET_MOVED);
                     // XXX: warn and notify me
                     log.info("the request offset: {} over flow badly, broker max offset: {}, consumer: {}",
-                        requestHeader.getQueueOffset(), getMessageResult.getMaxOffset(), remoteAddressSupplier.remoteAddress());
+                        requestHeader.getQueueOffset(), getMessageResult.getMaxOffset(), wrappedCtx.remoteAddress());
                     break;
                 case OFFSET_OVERFLOW_ONE:
                     response.setCode(ResponseCode.PULL_NOT_FOUND);
@@ -354,7 +348,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                     response.setCode(ResponseCode.PULL_OFFSET_MOVED);
                     log.info("the request offset too small. group={}, topic={}, requestOffset={}, brokerMinOffset={}, clientIp={}",
                         requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueOffset(),
-                        getMessageResult.getMinOffset(), remoteAddressSupplier.remoteAddress());
+                        getMessageResult.getMinOffset(), wrappedCtx.remoteAddress());
                     break;
                 default:
                     assert false;
@@ -413,7 +407,6 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                         getMessageResult.getBufferTotalSize());
 
                     this.brokerController.getBrokerStatsManager().incBrokerGetNums(getMessageResult.getMessageCount());
-                    // TODO consistency config in a batch
                     if (this.brokerController.getBrokerConfig().isTransferMsgByHeap()) {
                         final byte[] r = this.readGetMessageResult(getMessageResult, requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueId());
                         this.brokerController.getBrokerStatsManager().incGroupGetLatency(requestHeader.getConsumerGroup(),
@@ -426,7 +419,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                                 new ManyMessageTransfer(response.encodeHeader(getMessageResult.getBufferTotalSize()), getMessageResult);
                             Runnable releasingCallback = getMessageResult::release;
                             response.setAttachment(fileRegion);
-                            response.setFinallyCallback(releasingCallback);
+                            response.setFinallyReleasingCallback(releasingCallback);
                         } catch (Throwable e) {
                             log.error("gathering many-message-transfer exception", e);
                             getMessageResult.release();
@@ -448,7 +441,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
                         CompletableFuture<RemotingCommand> future = new CompletableFuture<>();
                         PullRequest pullRequest = new PullRequest(request, pollingTimeMills,
                             this.brokerController.getMessageStore().now(), offset, subscriptionData, messageFilter, future,
-                            remoteAddressSupplier, fastFailCallback);
+                            wrappedCtx);
                         this.brokerController.getPullRequestHoldService().suspendPullRequest(topic, queueId, pullRequest);
                         response.setAsyncFuture(future);
                         break;
@@ -496,7 +489,7 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
         storeOffsetEnable = storeOffsetEnable
             && this.brokerController.getMessageStoreConfig().getBrokerRole() != BrokerRole.SLAVE;
         if (storeOffsetEnable) {
-            this.brokerController.getConsumerOffsetManager().commitOffset(remoteAddressSupplier.channelRemoteAddr(),
+            this.brokerController.getConsumerOffsetManager().commitOffset(wrappedCtx.channelRemoteAddr(),
                 requestHeader.getConsumerGroup(), requestHeader.getTopic(), requestHeader.getQueueId(), requestHeader.getCommitOffset());
         }
 
@@ -584,28 +577,28 @@ public class PullMessageProcessor extends AsyncNettyRequestProcessor {
 
     public void executeRequestWhenWakeup(final RemotingCommand request,
                                          final CompletableFuture<RemotingCommand> future,
-                                         RemoteAddressSupplier remoteAddressSupplier,
-                                         Consumer<RemotingCommand> fastFailCallback) {
+                                         WrappedChannelHandlerContext wrappedCtx) {
         Runnable run = new Runnable() {
             @Override
             public void run() {
                 try {
-                    final RemotingCommand response = PullMessageProcessor.this.syncPullMessage(request, remoteAddressSupplier, fastFailCallback);
+                    final RemotingCommand response = PullMessageProcessor.this.syncPullMessage(request, wrappedCtx);
                     if (response != null) {
                         response.setOpaque(request.getOpaque());
                         response.markResponseType();
                     }
                     boolean triggered = future.complete(response);
-                    if (!triggered && response != null && response.getFinallyCallback() != null) {
+                    if (!triggered && response != null && response.getFinallyReleasingCallback() != null) {
                         // It means other thread has completed this future.
-                        response.getFinallyCallback().run();
+                        // If you want to add some code before finally callback, please make sure callback is in finally block.
+                        response.getFinallyReleasingCallback().run();
                     }
                 } catch (RemotingCommandException e1) {
                     log.error("excuteRequestWhenWakeup run", e1);
                 }
             }
         };
-        this.brokerController.getLongPollingExecutor().submit(new RequestTask(run, request, fastFailCallback));
+        this.brokerController.getLongPollingExecutor().submit(new RequestTask(run, request, wrappedCtx.getFastFailCallback()));
     }
 
     public void registerConsumeMessageHook(List<ConsumeMessageHook> consumeMessageHookList) {

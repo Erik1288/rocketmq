@@ -20,14 +20,11 @@ import com.google.common.base.Preconditions;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
-import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
-import java.util.ArrayList;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentMap;
 
 import static org.apache.rocketmq.remoting.protocol.RemotingSysResponseCode.SYSTEM_ERROR;
 
@@ -52,36 +49,17 @@ public class CommonMergeBatchResponseStrategy extends MergeBatchResponseStrategy
 
         ConcurrentHashMap<Integer, RemotingCommand> responses = new ConcurrentHashMap<>(expectedResponseNum);
 
-        opaqueToFuture.forEach((childOpaque, childFuture) -> {
-            childFuture.whenComplete((childResp, throwable) -> {
-                if (throwable != null) {
-                    log.error("Something is wrong with pull-merging. batch: {}, child: {}.", batchOpaque, childOpaque, throwable);
-                    responses.put(childOpaque, RemotingCommand.createResponse(childOpaque, SYSTEM_ERROR, REMARK_SYSTEM_ERROR));
-                } else {
-                    responses.put(childOpaque, nonNullableResponse(childOpaque, childResp));
-                }
-                try {
-                    completeBatchFuture(batchFuture, responses, expectedResponseNum, batchOpaque);
-                } catch (Exception e) {
-                    log.error("completeBatchFuture failed. batch: {}, child: {}.", batchOpaque, childOpaque, e);
-                    batchFuture.complete(RemotingCommand.createResponse(batchOpaque, SYSTEM_ERROR, REMARK_SYSTEM_ERROR));
-                }
-            });
-        });
+        opaqueToFuture.forEach((childOpaque, childFuture) -> childFuture.whenComplete((childResp, throwable) -> {
+            if (throwable != null) {
+                log.error("Something is wrong with pull-merging. batch: {}, child: {}.", batchOpaque, childOpaque, throwable);
+                responses.put(childOpaque, RemotingCommand.createResponse(childOpaque, SYSTEM_ERROR, REMARK_SYSTEM_ERROR));
+            } else {
+                responses.put(childOpaque, nonNullableResponse(childOpaque, childResp));
+            }
+            completeBatchFuture(batchFuture, responses, expectedResponseNum, batchOpaque, childOpaque);
+        }));
 
         return batchFuture;
-    }
-
-    private void completeBatchFuture(
-            CompletableFuture<RemotingCommand> batchFuture,
-            ConcurrentMap<Integer, RemotingCommand> responses,
-            int expectedResponseNum,
-            int batchOpaque) throws RemotingCommandException {
-        if (responses.size() != expectedResponseNum) {
-            return ;
-        }
-
-        batchFuture.complete(mergeChildren(new ArrayList<>(responses.values()), expectedResponseNum, batchOpaque));
     }
 
     public static CommonMergeBatchResponseStrategy getInstance() {

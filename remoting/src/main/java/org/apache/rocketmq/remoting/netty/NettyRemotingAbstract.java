@@ -39,7 +39,6 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import org.apache.rocketmq.logging.InternalLogger;
@@ -312,20 +311,32 @@ public abstract class NettyRemotingAbstract {
                                             payload = result;
                                         }
                                         ctx.writeAndFlush(payload).addListener((ChannelFutureListener) future -> {
-                                            if (result.getCallback() != null) {
-                                                result.getCallback().run();
-                                            }
-                                            if (result.getFinallyCallback() != null) {
-                                                result.getFinallyCallback().run();
+                                            try {
+                                                if (result.getCallback() != null) {
+                                                    pair.getObject2().submit(result.getCallback());
+                                                }
+                                            } catch (Exception e) {
+                                                log.error("Execution failed in channel future listener.", e);
+                                                if (result.getCallback() != null) {
+                                                    result.getCallback().run();
+                                                }
+                                            } finally {
+                                                if (result.getFinallyReleasingCallback() != null) {
+                                                    result.getFinallyReleasingCallback().run();
+                                                }
                                             }
                                         });
                                     } catch (Throwable e) {
-                                        final String format = "Process request completed OK while failed to " +
-                                                "write response. Request: {}, Response: {}";
-                                        log.error(format, cmd.toString(), result.toString(), e);
-                                        if (result.getFinallyCallback() != null) {
-                                            result.getFinallyCallback().run();
+                                        try {
+                                            final String format = "Process request completed OK while failed to " +
+                                                    "write response. Request: {}, Response: {}";
+                                            log.error(format, cmd.toString(), result.toString(), e);
+                                        } finally {
+                                            if (result.getFinallyReleasingCallback() != null) {
+                                                result.getFinallyReleasingCallback().run();
+                                            }
                                         }
+
                                     }
                                 }
                             }
@@ -361,7 +372,11 @@ public abstract class NettyRemotingAbstract {
             }
 
             try {
-                Consumer<RemotingCommand> fastFailCallback = ctx.channel()::writeAndFlush;
+                TriConsumer<Integer, Integer, String> fastFailCallback = (opaqueId, code, remark) -> {
+                    final RemotingCommand response = RemotingCommand.createResponseCommand(code, remark);
+                    response.setOpaque(opaqueId);
+                    ctx.channel().writeAndFlush(response);
+                };
                 final RequestTask requestTask = new RequestTask(run, cmd, fastFailCallback);
                 pair.getObject2().submit(requestTask);
             } catch (RejectedExecutionException e) {

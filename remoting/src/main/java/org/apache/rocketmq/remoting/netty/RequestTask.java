@@ -19,16 +19,15 @@ package org.apache.rocketmq.remoting.netty;
 
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
-import java.util.function.Consumer;
-
 public class RequestTask implements Runnable {
     private final Runnable runnable;
-    private final Consumer<RemotingCommand> fastFailCallback;
+    // opaque, code, remark
+    private final TriConsumer<Integer, Integer, String> fastFailCallback;
     private final long createTimestamp = System.currentTimeMillis();
     private final RemotingCommand request;
     private boolean stopRun = false;
 
-    public RequestTask(final Runnable runnable, final RemotingCommand request, Consumer<RemotingCommand> fastFailCallback) {
+    public RequestTask(final Runnable runnable, final RemotingCommand request, TriConsumer<Integer, Integer, String> fastFailCallback) {
         this.runnable = runnable;
         this.request = request;
         this.fastFailCallback = fastFailCallback;
@@ -79,10 +78,8 @@ public class RequestTask implements Runnable {
     }
 
     public void returnResponse(int code, String remark) {
-        final RemotingCommand response = RemotingCommand.createResponseCommand(code, remark);
-        response.setOpaque(request.getOpaque());
         if (this.fastFailCallback != null) {
-            this.fastFailCallback.accept(response);
+            this.fastFailCallback.accept(request.getOpaque(), code, remark);
         }
     }
 }

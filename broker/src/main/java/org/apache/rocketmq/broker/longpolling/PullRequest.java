@@ -16,13 +16,12 @@
  */
 package org.apache.rocketmq.broker.longpolling;
 
-import org.apache.rocketmq.broker.client.RemoteAddressSupplier;
+import org.apache.rocketmq.broker.processor.WrappedChannelHandlerContext;
 import org.apache.rocketmq.common.protocol.heartbeat.SubscriptionData;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 import org.apache.rocketmq.store.MessageFilter;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.function.Consumer;
 
 public class PullRequest {
     private final RemotingCommand requestCommand;
@@ -32,13 +31,12 @@ public class PullRequest {
     private final SubscriptionData subscriptionData;
     private final MessageFilter messageFilter;
     private final CompletableFuture<RemotingCommand> future;
-    private final RemoteAddressSupplier remoteAddressSupplier;
-    private final Consumer<RemotingCommand> fastFailCallback;
+    private final WrappedChannelHandlerContext wrappedCtx;
 
     public PullRequest(RemotingCommand requestCommand, long timeoutMillis, long suspendTimestamp,
                        long pullFromThisOffset, SubscriptionData subscriptionData,
                        MessageFilter messageFilter, CompletableFuture<RemotingCommand> future,
-                       RemoteAddressSupplier remoteAddressSupplier, Consumer<RemotingCommand> fastFailCallback) {
+                       WrappedChannelHandlerContext wrappedCtx) {
         this.requestCommand = requestCommand;
         this.timeoutMillis = timeoutMillis;
         this.suspendTimestamp = suspendTimestamp;
@@ -46,8 +44,7 @@ public class PullRequest {
         this.subscriptionData = subscriptionData;
         this.messageFilter = messageFilter;
         this.future = future;
-        this.remoteAddressSupplier = remoteAddressSupplier;
-        this.fastFailCallback = fastFailCallback;
+        this.wrappedCtx = wrappedCtx;
     }
 
     public RemotingCommand getRequestCommand() {
@@ -78,11 +75,7 @@ public class PullRequest {
         return future;
     }
 
-    public RemoteAddressSupplier getRemoteAddressSupplier() {
-        return remoteAddressSupplier;
-    }
-
-    public Consumer<RemotingCommand> getFastFailCallback() {
-        return fastFailCallback;
+    public WrappedChannelHandlerContext getWrappedCtx() {
+        return wrappedCtx;
     }
 }

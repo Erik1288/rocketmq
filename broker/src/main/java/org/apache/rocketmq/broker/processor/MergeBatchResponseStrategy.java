@@ -20,6 +20,9 @@ import com.google.common.base.Preconditions;
 import io.netty.channel.FileRegion;
 import org.apache.rocketmq.broker.pagecache.BatchManyMessageTransfer;
 import org.apache.rocketmq.broker.pagecache.ManyMessageTransfer;
+import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.logging.InternalLogger;
+import org.apache.rocketmq.logging.InternalLoggerFactory;
 import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
@@ -28,11 +31,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentMap;
 
 import static org.apache.rocketmq.remoting.protocol.RemotingSysResponseCode.SUCCESS;
 import static org.apache.rocketmq.remoting.protocol.RemotingSysResponseCode.SYSTEM_ERROR;
 
 public abstract class MergeBatchResponseStrategy {
+    private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
+
     private static final String SUFFIX = " (merge batch response strategy)";
     public static final String REMARK_PULL_NOT_FOUND = "pull not found" + SUFFIX;
     public static final String REMARK_SYSTEM_ERROR = "system error" + SUFFIX;
@@ -74,6 +80,32 @@ public abstract class MergeBatchResponseStrategy {
         return childResp;
     }
 
+    protected void completeBatchFuture(
+            CompletableFuture<RemotingCommand> batchFuture,
+            ConcurrentMap<Integer, RemotingCommand> responses,
+            int expectedResponseNum,
+            int batchOpaque,
+            int childOpaque) {
+        if (responses.size() != expectedResponseNum) {
+            return ;
+        }
+
+        try {
+            doCompleteBatchFuture(batchFuture, responses, expectedResponseNum, batchOpaque);
+        } catch (Exception e) {
+            log.error("completeBatchFuture failed. batch: {}, child: {}.", batchOpaque, childOpaque, e);
+            batchFuture.complete(RemotingCommand.createResponse(batchOpaque, SYSTEM_ERROR, REMARK_SYSTEM_ERROR));
+        }
+    }
+
+    private void doCompleteBatchFuture(
+            CompletableFuture<RemotingCommand> batchFuture,
+            ConcurrentMap<Integer, RemotingCommand> responses,
+            int expectedResponseNum,
+            int batchOpaque) throws RemotingCommandException {
+        batchFuture.complete(mergeChildren(new ArrayList<>(responses.values()), expectedResponseNum, batchOpaque));
+    }
+
     private RemotingCommand doMergeCommonChildren(List<RemotingCommand> responses, int batchOpaque, int code, String remark) throws RemotingCommandException {
         RemotingCommand batchResponse = RemotingCommand.mergeChildren(responses);
         batchResponse.setOpaque(batchOpaque);
@@ -87,12 +119,15 @@ public abstract class MergeBatchResponseStrategy {
 
         int bodyLength = 0;
         for (RemotingCommand resp : responses) {
-            if (resp.getAttachment() != null) {
-                ManyMessageTransfer manyMessageTransfer = (ManyMessageTransfer) resp.getAttachment();
-                manyMessageTransferList.add(manyMessageTransfer);
-
-                bodyLength += manyMessageTransfer.count();
+            // TODO memory leak.
+            if (resp.getAttachment() == null) {
+                throw new RuntimeException("ZeroCopy inconsistency in a batch.");
             }
+
+            ManyMessageTransfer manyMessageTransfer = (ManyMessageTransfer) resp.getAttachment();
+            manyMessageTransferList.add(manyMessageTransfer);
+
+            bodyLength += manyMessageTransfer.count();
         }
 
         RemotingCommand zeroCopyResponse = RemotingCommand.createResponse(batchOpaque, code, remark);
@@ -102,7 +137,7 @@ public abstract class MergeBatchResponseStrategy {
 
         Runnable releaseBatch = batchManyMessageTransfer::close;
         zeroCopyResponse.setAttachment(batchManyMessageTransfer);
-        zeroCopyResponse.setFinallyCallback(releaseBatch);
+        zeroCopyResponse.setFinallyReleasingCallback(releaseBatch);
         return zeroCopyResponse;
     }
 }

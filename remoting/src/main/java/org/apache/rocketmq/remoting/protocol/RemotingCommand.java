@@ -101,7 +101,7 @@ public class RemotingCommand {
     // async response common callback
     private transient Runnable callback;
     // async response special callback, and it’s USED FOR releasing reference-counted resources ONLY.
-    private transient Runnable finallyCallback;
+    private transient Runnable finallyReleasingCallback;
 
     protected RemotingCommand() {
     }
@@ -112,6 +112,12 @@ public class RemotingCommand {
         cmd.customHeader = customHeader;
         setCmdVersion(cmd);
         return cmd;
+    }
+
+    public void setHeader(int code, CommandCustomHeader customHeader) {
+        this.setCode(code);
+        this.customHeader = customHeader;
+        setCmdVersion(this);
     }
 
     private static void setCmdVersion(RemotingCommand cmd) {
@@ -628,12 +634,12 @@ public class RemotingCommand {
         this.callback = callback;
     }
 
-    public Runnable getFinallyCallback() {
-        return finallyCallback;
+    public Runnable getFinallyReleasingCallback() {
+        return finallyReleasingCallback;
     }
 
-    public void setFinallyCallback(Runnable finallyCallback) {
-        this.finallyCallback = finallyCallback;
+    public void setFinallyReleasingCallback(Runnable finallyReleasingCallback) {
+        this.finallyReleasingCallback = finallyReleasingCallback;
     }
 
     @Override

@@ -20,7 +20,6 @@ import io.netty.channel.ChannelHandlerContext;
 import java.util.List;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.client.ConsumerGroupInfo;
-import org.apache.rocketmq.broker.client.RemoteAddressSupplier;
 import org.apache.rocketmq.common.constant.LoggerName;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.common.protocol.RequestCode;
@@ -49,14 +48,14 @@ public class ConsumerManageProcessor extends AsyncNettyRequestProcessor {
     @Override
     public RemotingCommand processRequest(ChannelHandlerContext ctx, RemotingCommand request)
         throws RemotingCommandException {
-        RemoteAddressSupplier remoteAddressSupplier = new RemoteAddressSupplier(ctx.channel());
+        WrappedChannelHandlerContext wrappedCtx = new WrappedChannelHandlerContext(ctx);
         switch (request.getCode()) {
             case RequestCode.GET_CONSUMER_LIST_BY_GROUP:
-                return this.getConsumerListByGroup(request, remoteAddressSupplier);
+                return this.getConsumerListByGroup(request, wrappedCtx);
             case RequestCode.UPDATE_CONSUMER_OFFSET:
-                return this.updateConsumerOffset(request, remoteAddressSupplier);
+                return this.updateConsumerOffset(request, wrappedCtx);
             case RequestCode.QUERY_CONSUMER_OFFSET:
-                return this.queryConsumerOffset(request, remoteAddressSupplier);
+                return this.queryConsumerOffset(request, wrappedCtx);
             default:
                 break;
         }
@@ -68,7 +67,7 @@ public class ConsumerManageProcessor extends AsyncNettyRequestProcessor {
         return false;
     }
 
-    public RemotingCommand getConsumerListByGroup(RemotingCommand request, RemoteAddressSupplier remoteAddressSupplier)
+    public RemotingCommand getConsumerListByGroup(RemotingCommand request, WrappedChannelHandlerContext wrappedCtx)
         throws RemotingCommandException {
         final RemotingCommand response =
             RemotingCommand.createResponseCommand(GetConsumerListByGroupResponseHeader.class);
@@ -90,11 +89,11 @@ public class ConsumerManageProcessor extends AsyncNettyRequestProcessor {
                 return response;
             } else {
                 log.warn("getAllClientId failed, {} {}", requestHeader.getConsumerGroup(),
-                    remoteAddressSupplier.channelRemoteAddr());
+                    wrappedCtx.channelRemoteAddr());
             }
         } else {
             log.warn("getConsumerGroupInfo failed, {} {}", requestHeader.getConsumerGroup(),
-                    remoteAddressSupplier.channelRemoteAddr());
+                    wrappedCtx.channelRemoteAddr());
         }
 
         response.setCode(ResponseCode.SYSTEM_ERROR);
@@ -103,14 +102,14 @@ public class ConsumerManageProcessor extends AsyncNettyRequestProcessor {
         return response;
     }
 
-    private RemotingCommand updateConsumerOffset(RemotingCommand request, RemoteAddressSupplier remoteAddressSupplier)
+    private RemotingCommand updateConsumerOffset(RemotingCommand request, WrappedChannelHandlerContext wrappedCtx)
         throws RemotingCommandException {
         final RemotingCommand response =
             RemotingCommand.createResponseCommand(UpdateConsumerOffsetResponseHeader.class);
         final UpdateConsumerOffsetRequestHeader requestHeader =
             (UpdateConsumerOffsetRequestHeader) request
                 .decodeCommandCustomHeader(UpdateConsumerOffsetRequestHeader.class);
-        this.brokerController.getConsumerOffsetManager().commitOffset(remoteAddressSupplier.channelRemoteAddr(), requestHeader.getConsumerGroup(),
+        this.brokerController.getConsumerOffsetManager().commitOffset(wrappedCtx.channelRemoteAddr(), requestHeader.getConsumerGroup(),
             requestHeader.getTopic(), requestHeader.getQueueId(), requestHeader.getCommitOffset());
         response.setCode(ResponseCode.SUCCESS);
         response.setRemark(null);
@@ -118,7 +117,7 @@ public class ConsumerManageProcessor extends AsyncNettyRequestProcessor {
         return response;
     }
 
-    private RemotingCommand queryConsumerOffset(RemotingCommand request, RemoteAddressSupplier remoteAddressSupplier)
+    private RemotingCommand queryConsumerOffset(RemotingCommand request, WrappedChannelHandlerContext wrappedCtx)
         throws RemotingCommandException {
         final RemotingCommand response =
             RemotingCommand.createResponseCommand(QueryConsumerOffsetResponseHeader.class);

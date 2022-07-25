@@ -21,6 +21,7 @@ import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.topic.TopicConfigManager;
 import org.apache.rocketmq.common.BrokerConfig;
 import org.apache.rocketmq.common.TopicConfig;
+import org.apache.rocketmq.common.protocol.RequestCode;
 import org.apache.rocketmq.remoting.netty.NettyClientConfig;
 import org.apache.rocketmq.remoting.netty.NettyServerConfig;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
@@ -87,7 +88,7 @@ public class BatchProtocolConsumerManagerTest extends BatchProtocol {
         }
 
         RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(expectedRequests.values()));
-        batchRequest.setRemark(CommonBatchProcessor.DISPATCH_CONSUMER_OFFSET);
+        makeHeader(batchRequest, RequestCode.QUERY_CONSUMER_OFFSET);
 
         CompletableFuture<RemotingCommand> batchFuture = commonBatchProcessor.asyncProcessRequest(ctx, batchRequest, callback);
 
@@ -119,7 +120,7 @@ public class BatchProtocolConsumerManagerTest extends BatchProtocol {
         }
 
         RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(expectedRequests.values()));
-        batchRequest.setRemark(CommonBatchProcessor.DISPATCH_CONSUMER_OFFSET);
+        makeHeader(batchRequest, RequestCode.UPDATE_CONSUMER_OFFSET);
 
         CompletableFuture<RemotingCommand> batchFuture = commonBatchProcessor.asyncProcessRequest(ctx, batchRequest, callback);
 

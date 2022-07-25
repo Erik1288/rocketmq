@@ -21,6 +21,8 @@ import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.broker.topic.TopicConfigManager;
 import org.apache.rocketmq.common.BrokerConfig;
 import org.apache.rocketmq.common.TopicConfig;
+import org.apache.rocketmq.common.protocol.RequestCode;
+import org.apache.rocketmq.common.protocol.header.CommonBatchRequestHeader;
 import org.apache.rocketmq.remoting.netty.NettyClientConfig;
 import org.apache.rocketmq.remoting.netty.NettyServerConfig;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
@@ -93,7 +95,8 @@ public class BatchProtocolSendTest extends BatchProtocol {
         }
 
         RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(expectedRequests.values()));
-        batchRequest.setRemark(CommonBatchProcessor.DISPATCH_SEND);
+        makeHeader(batchRequest, RequestCode.SEND_MESSAGE);
+
         CompletableFuture<RemotingCommand> batchFuture = commonBatchProcessor.asyncProcessRequest(ctx, batchRequest, callback);
         RemotingCommand batchResponse = batchFuture.get();
         List<RemotingCommand> childResponses = RemotingCommand.parseChildren(batchResponse);

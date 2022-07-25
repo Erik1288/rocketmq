@@ -25,7 +25,6 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import io.netty.channel.ChannelHandlerContext;
 import org.apache.rocketmq.broker.BrokerController;
-import org.apache.rocketmq.broker.client.RemoteAddressSupplier;
 import org.apache.rocketmq.broker.mqtrace.ConsumeMessageContext;
 import org.apache.rocketmq.broker.mqtrace.ConsumeMessageHook;
 import org.apache.rocketmq.broker.mqtrace.SendMessageContext;
@@ -95,16 +94,16 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor {
                 return this.asyncConsumerSendMsgBack(request);
             default:
                 SendMessageRequestHeader requestHeader = parseRequestHeader(request);
-                RemoteAddressSupplier remoteAddressSupplier = new RemoteAddressSupplier(ctx.channel());
+                WrappedChannelHandlerContext wrappedCtx = new WrappedChannelHandlerContext(ctx);
                 if (requestHeader == null) {
                     return CompletableFuture.completedFuture(null);
                 }
-                mqtraceContext = buildMsgContext(requestHeader, remoteAddressSupplier);
-                this.executeSendMessageHookBefore(request, mqtraceContext, remoteAddressSupplier);
+                mqtraceContext = buildMsgContext(requestHeader, wrappedCtx);
+                this.executeSendMessageHookBefore(request, mqtraceContext, wrappedCtx);
                 if (requestHeader.isBatch()) {
-                    return this.asyncSendBatchMessage(request, mqtraceContext, requestHeader, remoteAddressSupplier);
+                    return this.asyncSendBatchMessage(request, mqtraceContext, requestHeader, wrappedCtx);
                 } else {
-                    return this.asyncSendMessage(request, mqtraceContext, requestHeader, remoteAddressSupplier);
+                    return this.asyncSendMessage(request, mqtraceContext, requestHeader, wrappedCtx);
                 }
         }
     }
@@ -267,8 +266,8 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor {
     private CompletableFuture<RemotingCommand> asyncSendMessage(RemotingCommand request,
                                                                 SendMessageContext mqtraceContext,
                                                                 SendMessageRequestHeader requestHeader,
-                                                                RemoteAddressSupplier remoteAddressSupplier) {
-        final RemotingCommand response = preSend(request, requestHeader, remoteAddressSupplier);
+                                                                WrappedChannelHandlerContext wrappedCtx) {
+        final RemotingCommand response = preSend(request, requestHeader, wrappedCtx);
         final SendMessageResponseHeader responseHeader = (SendMessageResponseHeader)response.readCustomHeader();
 
         if (response.getCode() != -1) {
@@ -297,7 +296,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor {
         Map<String, String> origProps = MessageDecoder.string2messageProperties(requestHeader.getProperties());
         MessageAccessor.setProperties(msgInner, origProps);
         msgInner.setBornTimestamp(requestHeader.getBornTimestamp());
-        msgInner.setBornHost(remoteAddressSupplier.remoteAddress());
+        msgInner.setBornHost(wrappedCtx.remoteAddress());
         msgInner.setStoreHost(this.getStoreHost());
         msgInner.setReconsumeTimes(requestHeader.getReconsumeTimes() == null ? 0 : requestHeader.getReconsumeTimes());
         String clusterName = this.brokerController.getBrokerConfig().getBrokerClusterName();
@@ -390,7 +389,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor {
     private RemotingCommand sendMessage(final RemotingCommand request,
                                         final SendMessageContext sendMessageContext,
                                         final SendMessageRequestHeader requestHeader,
-                                        final RemoteAddressSupplier remoteAddressSupplier) throws RemotingCommandException {
+                                        final WrappedChannelHandlerContext wrappedCtx) throws RemotingCommandException {
 
         final RemotingCommand response = RemotingCommand.createResponseCommand(SendMessageResponseHeader.class);
         final SendMessageResponseHeader responseHeader = (SendMessageResponseHeader)response.readCustomHeader();
@@ -410,7 +409,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor {
         }
 
         response.setCode(-1);
-        super.msgCheck(requestHeader, response, remoteAddressSupplier);
+        super.msgCheck(requestHeader, response, wrappedCtx);
         if (response.getCode() != -1) {
             return response;
         }
@@ -436,7 +435,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor {
         msgInner.setFlag(requestHeader.getFlag());
         MessageAccessor.setProperties(msgInner, MessageDecoder.string2messageProperties(requestHeader.getProperties()));
         msgInner.setBornTimestamp(requestHeader.getBornTimestamp());
-        msgInner.setBornHost(remoteAddressSupplier.remoteAddress());
+        msgInner.setBornHost(wrappedCtx.remoteAddress());
         msgInner.setStoreHost(this.getStoreHost());
         msgInner.setReconsumeTimes(requestHeader.getReconsumeTimes() == null ? 0 : requestHeader.getReconsumeTimes());
         String clusterName = this.brokerController.getBrokerConfig().getBrokerClusterName();
@@ -580,8 +579,8 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor {
     private CompletableFuture<RemotingCommand> asyncSendBatchMessage(RemotingCommand request,
                                                                      SendMessageContext mqtraceContext,
                                                                      SendMessageRequestHeader requestHeader,
-                                                                     RemoteAddressSupplier remoteAddressSupplier) {
-        final RemotingCommand response = preSend(request, requestHeader, remoteAddressSupplier);
+                                                                     WrappedChannelHandlerContext wrappedCtx) {
+        final RemotingCommand response = preSend(request, requestHeader, wrappedCtx);
         final SendMessageResponseHeader responseHeader = (SendMessageResponseHeader)response.readCustomHeader();
 
         if (response.getCode() != -1) {
@@ -615,7 +614,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor {
         MessageAccessor.setProperties(messageExtBatch, MessageDecoder.string2messageProperties(requestHeader.getProperties()));
         messageExtBatch.setBody(request.getBody());
         messageExtBatch.setBornTimestamp(requestHeader.getBornTimestamp());
-        messageExtBatch.setBornHost(remoteAddressSupplier.remoteAddress());
+        messageExtBatch.setBornHost(wrappedCtx.remoteAddress());
         messageExtBatch.setStoreHost(this.getStoreHost());
         messageExtBatch.setReconsumeTimes(requestHeader.getReconsumeTimes() == null ? 0 : requestHeader.getReconsumeTimes());
         String clusterName = this.brokerController.getBrokerConfig().getBrokerClusterName();
@@ -694,7 +693,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor {
 
     private RemotingCommand preSend(RemotingCommand request,
                                     SendMessageRequestHeader requestHeader,
-                                    RemoteAddressSupplier remoteAddressSupplier) {
+                                    WrappedChannelHandlerContext wrappedCtx) {
         final RemotingCommand response = RemotingCommand.createResponseCommand(SendMessageResponseHeader.class);
 
         response.setOpaque(request.getOpaque());
@@ -713,7 +712,7 @@ public class SendMessageProcessor extends AbstractSendMessageProcessor {
         }
 
         response.setCode(-1);
-        super.msgCheck(requestHeader, response, remoteAddressSupplier);
+        super.msgCheck(requestHeader, response, wrappedCtx);
 
         return response;
     }

@@ -19,24 +19,25 @@ package org.apache.rocketmq.broker.processor;
 import io.netty.channel.ChannelHandlerContext;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.common.constant.LoggerName;
+import org.apache.rocketmq.common.protocol.header.CommonBatchRequestHeader;
 import org.apache.rocketmq.logging.InternalLogger;
 import org.apache.rocketmq.logging.InternalLoggerFactory;
+import org.apache.rocketmq.remoting.common.Pair;
+import org.apache.rocketmq.remoting.exception.RemotingCommandException;
 import org.apache.rocketmq.remoting.netty.AsyncNettyRequestProcessor;
+import org.apache.rocketmq.remoting.netty.NettyRequestProcessor;
 import org.apache.rocketmq.remoting.netty.RemotingResponseCallback;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
 
 public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
 
-    public static final String DISPATCH_SEND = "Send";
-    public static final String DISPATCH_PULL = "Pull";
-    public static final String DISPATCH_CONSUMER_OFFSET = "ConsumerOffset";
     private final BrokerController brokerController;
 
     public CommonBatchProcessor(BrokerController brokerController) {
@@ -83,19 +84,13 @@ public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
         }
     }
 
-    private AsyncNettyRequestProcessor dispatchProcessor(RemotingCommand batchRequest) {
-        // TODO use [remark] for logic dispatching for the time being.
-        String dispatchMark = batchRequest.getRemark();
+    private AsyncNettyRequestProcessor dispatchProcessor(RemotingCommand batchRequest) throws RemotingCommandException {
+        final CommonBatchRequestHeader requestHeader =
+                (CommonBatchRequestHeader) batchRequest.decodeCommandCustomHeader(CommonBatchRequestHeader.class);
 
-        if (Objects.equals(DISPATCH_SEND, dispatchMark)) {
-            return this.brokerController.getSendProcessor();
-        } else if (Objects.equals(DISPATCH_PULL, dispatchMark)) {
-            return this.brokerController.getPullMessageProcessor();
-        } else if (Objects.equals(DISPATCH_CONSUMER_OFFSET, dispatchMark)) {
-            return this.brokerController.getConsumerManageProcessor();
-        } else {
-            log.error("processor is not supported for [{}].", dispatchMark);
-            throw new RuntimeException("processor is not supported for [" + dispatchMark + "].");
-        }
+        int dispatchCode = requestHeader.getCode();
+
+        Pair<NettyRequestProcessor, ExecutorService> processorPair = this.brokerController.getRemotingServer().getProcessorPair(dispatchCode);
+        return (AsyncNettyRequestProcessor) processorPair.getObject1();
     }
 }

@@ -14,25 +14,21 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.rocketmq.broker.client;
 
-import io.netty.channel.Channel;
-import org.apache.rocketmq.remoting.common.RemotingHelper;
+package org.apache.rocketmq.remoting.netty;
 
-import java.net.SocketAddress;
+/**
+ * Represents an operation that accepts three input arguments and returns no result.
+ */
+@FunctionalInterface
+public interface TriConsumer<T, U, S> {
 
-public class RemoteAddressSupplier {
-    private final Channel channel;
-
-    public RemoteAddressSupplier(Channel channel) {
-        this.channel = channel;
-    }
-
-    public SocketAddress remoteAddress() {
-        return channel.remoteAddress();
-    }
-
-    public String channelRemoteAddr() {
-        return RemotingHelper.parseChannelRemoteAddr(channel);
-    }
+    /**
+     * Performs this operation on the given arguments.
+     *
+     * @param t the first input argument
+     * @param u the second input argument
+     * @param s the third input argument
+     */
+    void accept(T t, U u, S s);
 }
