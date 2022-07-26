@@ -47,7 +47,7 @@ public abstract class MergeBatchResponseStrategy {
      * @param opaqueToFuture responses
      * @return batch future
      */
-    public abstract CompletableFuture<RemotingCommand> merge(
+    public abstract CompletableFuture<RemotingCommand> mergeResponses(
             Integer batchOpaque,
             Map<Integer, CompletableFuture<RemotingCommand>> opaqueToFuture) throws Exception;
 

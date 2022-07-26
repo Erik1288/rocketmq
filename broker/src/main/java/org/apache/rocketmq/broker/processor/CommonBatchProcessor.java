@@ -73,7 +73,7 @@ public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
         }
 
         MergeBatchResponseStrategy strategy = selectStrategy(asyncNettyRequestProcessor);
-        return strategy.merge(request.getOpaque(), opaqueToFuture);
+        return strategy.mergeResponses(request.getOpaque(), opaqueToFuture);
     }
 
     private MergeBatchResponseStrategy selectStrategy(AsyncNettyRequestProcessor asyncNettyRequestProcessor) {
@@ -91,6 +91,9 @@ public class CommonBatchProcessor extends AsyncNettyRequestProcessor {
         int dispatchCode = requestHeader.getCode();
 
         Pair<NettyRequestProcessor, ExecutorService> processorPair = this.brokerController.getRemotingServer().getProcessorPair(dispatchCode);
+        if (processorPair == null) {
+            throw new RuntimeException("dispatchCode " + dispatchCode + " is not supported.");
+        }
         return (AsyncNettyRequestProcessor) processorPair.getObject1();
     }
 }

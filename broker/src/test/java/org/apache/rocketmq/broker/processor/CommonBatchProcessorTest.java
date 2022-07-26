@@ -16,9 +16,10 @@
  */
 package org.apache.rocketmq.broker.processor;
 
+import io.netty.channel.Channel;
 import org.apache.rocketmq.broker.BrokerController;
 import org.apache.rocketmq.common.BrokerConfig;
-import org.apache.rocketmq.remoting.exception.RemotingCommandException;
+import org.apache.rocketmq.common.protocol.RequestCode;
 import org.apache.rocketmq.remoting.netty.NettyClientConfig;
 import org.apache.rocketmq.remoting.netty.NettyServerConfig;
 import org.apache.rocketmq.remoting.protocol.RemotingCommand;
@@ -29,21 +30,21 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.junit.MockitoJUnitRunner;
 
-import java.io.UnsupportedEncodingException;
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 @RunWith(MockitoJUnitRunner.class)
-public class CommonBatchProcessorTest  extends BatchProtocol {
+public class CommonBatchProcessorTest extends BatchProtocol {
     private final int totalRequestNum = 20;
     private final Integer queue = 0;
     private final String producerGroup = "producer-group";
     private final String topicPrefix = "batch-protocol-";
-    // private final CommonBatchProcessor commonBatchProcessor;
 
     @Before
     public void init() throws Exception {
@@ -54,7 +55,10 @@ public class CommonBatchProcessorTest  extends BatchProtocol {
                 new MessageStoreConfig());
         assertThat(brokerController.initialize()).isTrue();
         brokerController.start();
-        // this.commonBatchProcessor =
+
+        Channel mockChannel = mock(Channel.class);
+        when(mockChannel.remoteAddress()).thenReturn(new InetSocketAddress(1024));
+        when(ctx.channel()).thenReturn(mockChannel);
     }
 
     @After
@@ -64,7 +68,7 @@ public class CommonBatchProcessorTest  extends BatchProtocol {
     }
 
     @Test
-    public void test() throws UnsupportedEncodingException, RemotingCommandException {
+    public void testWithCommonBatchHeader() throws Exception {
         Map<Integer, RemotingCommand> expectedRequests = new HashMap<>();
         for (int i = 0; i < totalRequestNum; i++) {
             String topic = topicPrefix + "-" + i;
@@ -72,6 +76,19 @@ public class CommonBatchProcessorTest  extends BatchProtocol {
             expectedRequests.put(childSendRequest.getOpaque(), childSendRequest);
         }
         RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(expectedRequests.values()));
+        makeHeader(batchRequest, RequestCode.SEND_MESSAGE);
+        brokerController.getCommonBatchProcessor().asyncProcessRequest(ctx, batchRequest, callback);
+    }
 
+    @Test(expected = RuntimeException.class)
+    public void testWithoutCommonBatchHeader() throws Exception {
+        Map<Integer, RemotingCommand> expectedRequests = new HashMap<>();
+        for (int i = 0; i < totalRequestNum; i++) {
+            String topic = topicPrefix + "-" + i;
+            RemotingCommand childSendRequest = createSendRequest(producerGroup, topic, queue);
+            expectedRequests.put(childSendRequest.getOpaque(), childSendRequest);
+        }
+        RemotingCommand batchRequest = RemotingCommand.mergeChildren(new ArrayList<>(expectedRequests.values()));
+        brokerController.getCommonBatchProcessor().asyncProcessRequest(ctx, batchRequest, callback);
     }
 }

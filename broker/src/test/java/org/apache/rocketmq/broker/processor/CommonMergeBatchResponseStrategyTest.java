@@ -74,7 +74,7 @@ public class CommonMergeBatchResponseStrategyTest {
 
         CompletableFuture<RemotingCommand> batchFuture = null;
         try {
-            batchFuture = strategy.merge(batchOpaque, allResults);
+            batchFuture = strategy.mergeResponses(batchOpaque, allResults);
         } catch (Exception e) {
             e.printStackTrace();
         }

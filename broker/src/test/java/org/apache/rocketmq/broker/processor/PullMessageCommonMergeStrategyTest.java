@@ -72,7 +72,7 @@ public class PullMessageCommonMergeStrategyTest {
         allResults.putAll(doneResults);
         allResults.putAll(undoneResults);
 
-        CompletableFuture<RemotingCommand> batchFuture = strategy.merge(batchOpaque, allResults);
+        CompletableFuture<RemotingCommand> batchFuture = strategy.mergeResponses(batchOpaque, allResults);
         Assert.assertTrue(batchFuture.isDone());
 
         RemotingCommand actualBatchResponse = batchFuture.get();
@@ -113,7 +113,7 @@ public class PullMessageCommonMergeStrategyTest {
         allResults.putAll(doneResults);
         allResults.putAll(undoneResults);
 
-        CompletableFuture<RemotingCommand> batchFuture = strategy.merge(batchOpaque, allResults);
+        CompletableFuture<RemotingCommand> batchFuture = strategy.mergeResponses(batchOpaque, allResults);
         Assert.assertFalse(batchFuture.isDone());
 
         int chooseOneOpaqueComplete = random.nextInt(totalResponseNum);
@@ -126,4 +126,5 @@ public class PullMessageCommonMergeStrategyTest {
         List<RemotingCommand> actualChildResponses = RemotingCommand.parseChildren(actualBatchResponse);
         Assert.assertEquals(totalResponseNum, actualChildResponses.size());
     }
+
 }

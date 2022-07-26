@@ -37,6 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.rocketmq.common.protocol.ResponseCode.PULL_NOT_FOUND;
 import static org.apache.rocketmq.remoting.protocol.RemotingSysResponseCode.SUCCESS;
+import static org.apache.rocketmq.remoting.protocol.RemotingSysResponseCode.SYSTEM_ERROR;
 
 public class PullMessageCommonMergeStrategy extends MergeBatchResponseStrategy {
     private static final InternalLogger log = InternalLoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
@@ -47,7 +48,7 @@ public class PullMessageCommonMergeStrategy extends MergeBatchResponseStrategy {
     }
 
     @Override
-    public CompletableFuture<RemotingCommand> merge(
+    public CompletableFuture<RemotingCommand> mergeResponses(
             Integer batchOpaque,
             Map<Integer, CompletableFuture<RemotingCommand>> opaqueToFuture) {
 
@@ -120,12 +121,12 @@ public class PullMessageCommonMergeStrategy extends MergeBatchResponseStrategy {
         if (!withAttachment.isEmpty() && withoutAttachmentHavingNoData.size() == withoutAttachment.size()) {
             return true;
         } else {
-            withAttachment.forEach(remotingCommand -> {
-                if (remotingCommand.getFinallyReleasingCallback() != null) {
-                    remotingCommand.getFinallyReleasingCallback().run();
+            withAttachment.forEach(childResp -> {
+                if (childResp.getFinallyReleasingCallback() != null) {
+                    childResp.getFinallyReleasingCallback().run();
                 }
             });
-            throw new RuntimeException("inconsistency config: transfer by heap.");
+            throw new RuntimeException("inconsistent config: transfer by heap.");
         }
     }
 
@@ -134,7 +135,7 @@ public class PullMessageCommonMergeStrategy extends MergeBatchResponseStrategy {
             return future.get();
         } catch (InterruptedException | ExecutionException e) {
             log.error("extractResult failed. batch: {}, child: {}.", batchOpaque, childOpaque, e);
-            return RemotingCommand.createResponse(childOpaque, PULL_NOT_FOUND, REMARK_PULL_NOT_FOUND);
+            return RemotingCommand.createResponse(childOpaque, SYSTEM_ERROR, REMARK_SYSTEM_ERROR);
         }
     }
 

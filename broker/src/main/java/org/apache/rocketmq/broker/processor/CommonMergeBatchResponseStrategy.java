@@ -37,7 +37,7 @@ public class CommonMergeBatchResponseStrategy extends MergeBatchResponseStrategy
     private static final CommonMergeBatchResponseStrategy commonMergeBatchResponseStrategy = new CommonMergeBatchResponseStrategy();
 
     @Override
-    public CompletableFuture<RemotingCommand> merge(
+    public CompletableFuture<RemotingCommand> mergeResponses(
             Integer batchOpaque,
             Map<Integer, CompletableFuture<RemotingCommand>> opaqueToFuture) throws Exception {
         Preconditions.checkNotNull(batchOpaque, "batchOpaque shouldn't be null.");
